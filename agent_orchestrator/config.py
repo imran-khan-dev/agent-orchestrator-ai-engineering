@@ -32,6 +32,10 @@ class OrchestratorConfig(BaseModel):
         default=None,
         description="Optional provider-specific retry policy override; defaults to retry_policy.",
     )
+    tool_retry_policy: RetryPolicy | None = Field(
+        default=None,
+        description="Optional tool-specific retry policy override; defaults to retry_policy.",
+    )
 
     @field_validator("max_iterations", "max_tool_calls")
     @classmethod

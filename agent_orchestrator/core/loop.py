@@ -107,6 +107,7 @@ class AgentLoop:
         provider: LLMProvider | None = None,
         tools: list[ToolDefinition] | None = None,
         provider_retry_policy: RetryPolicy | None = None,
+        tool_retry_policy: RetryPolicy | None = None,
     ) -> tuple[AgentState, ExecutionResult]:
         """Run an agent execution synchronously.
 
@@ -118,6 +119,7 @@ class AgentLoop:
             tools: Optional tool definitions for provider requests; defaults to
                 definitions from the configured tool executor's registry.
             provider_retry_policy: Optional provider retry policy override.
+            tool_retry_policy: Optional tool retry policy override.
 
         Returns:
             The final agent state and execution result.
@@ -138,7 +140,7 @@ class AgentLoop:
                 result = self._run_with_step(state, tool_context, step, trace_id, root_span)
             elif provider is not None:
                 result = self._run_with_provider_sync(
-                    state, tool_context, provider, tools, provider_retry_policy, trace_id, root_span
+                    state, tool_context, provider, tools, provider_retry_policy, tool_retry_policy, trace_id, root_span
                 )
             else:
                 result = self._run_with_step(
@@ -169,6 +171,7 @@ class AgentLoop:
         provider: LLMProvider | None = None,
         tools: list[ToolDefinition] | None = None,
         provider_retry_policy: RetryPolicy | None = None,
+        tool_retry_policy: RetryPolicy | None = None,
     ) -> tuple[AgentState, ExecutionResult]:
         """Run an agent execution asynchronously.
 
@@ -194,7 +197,7 @@ class AgentLoop:
                 )
             elif provider is not None:
                 result = await self._run_with_provider_async(
-                    state, tool_context, provider, tools, provider_retry_policy, trace_id, root_span
+                    state, tool_context, provider, tools, provider_retry_policy, tool_retry_policy, trace_id, root_span
                 )
             else:
                 result = await self._run_with_step_async(
@@ -301,6 +304,7 @@ class AgentLoop:
         provider: LLMProvider,
         tools: list[ToolDefinition] | None,
         provider_retry_policy: RetryPolicy | None,
+        tool_retry_policy: RetryPolicy | None,
         trace_id: str,
         parent_span_id: str | None,
     ) -> tuple[AgentState, ExecutionResult]:
@@ -331,7 +335,8 @@ class AgentLoop:
                     provider, request, policy, trace_id, iter_span, state.iteration_count
                 )
                 terminal = self._handle_provider_response_sync(
-                    state, tool_context, response, trace_id, iter_span, state.iteration_count
+                    state, tool_context, response, trace_id, iter_span, state.iteration_count,
+                    tool_retry_policy=tool_retry_policy,
                 )
             except Exception:
                 self._end_span(iter_span, trace_id, SpanStatus.ERROR)
@@ -348,6 +353,7 @@ class AgentLoop:
         provider: LLMProvider,
         tools: list[ToolDefinition] | None,
         provider_retry_policy: RetryPolicy | None,
+        tool_retry_policy: RetryPolicy | None,
         trace_id: str,
         parent_span_id: str | None,
     ) -> tuple[AgentState, ExecutionResult]:
@@ -378,7 +384,8 @@ class AgentLoop:
                     provider, request, policy, trace_id, iter_span, state.iteration_count
                 )
                 terminal = await self._handle_provider_response_async(
-                    state, tool_context, response, trace_id, iter_span, state.iteration_count
+                    state, tool_context, response, trace_id, iter_span, state.iteration_count,
+                    tool_retry_policy=tool_retry_policy,
                 )
             except Exception:
                 self._end_span(iter_span, trace_id, SpanStatus.ERROR)
@@ -691,6 +698,7 @@ class AgentLoop:
         trace_id: str,
         parent_span_id: str | None,
         iteration: int,
+        tool_retry_policy: RetryPolicy | None = None,
     ) -> tuple[AgentState, ExecutionResult] | None:
         normalized = self._normalize_provider_response(response)
         if normalized.error is not None:
@@ -710,7 +718,8 @@ class AgentLoop:
                     tool_result = precomputed
                 else:
                     tool_result = self._execute_tool_sync(
-                        tool_call, tool_context, trace_id, parent_span_id, state.execution_id, iteration
+                        tool_call, tool_context, trace_id, parent_span_id, state.execution_id, iteration,
+                        tool_retry_policy=tool_retry_policy,
                     )
                 self._append_tool_result_message(state, tool_result)
             return None
@@ -726,6 +735,7 @@ class AgentLoop:
         trace_id: str,
         parent_span_id: str | None,
         iteration: int,
+        tool_retry_policy: RetryPolicy | None = None,
     ) -> tuple[AgentState, ExecutionResult] | None:
         normalized = self._normalize_provider_response(response)
         if normalized.error is not None:
@@ -745,7 +755,8 @@ class AgentLoop:
                     tool_result = precomputed
                 else:
                     tool_result = await self._execute_tool_async(
-                        tool_call, tool_context, trace_id, parent_span_id, state.execution_id, iteration
+                        tool_call, tool_context, trace_id, parent_span_id, state.execution_id, iteration,
+                        tool_retry_policy=tool_retry_policy,
                     )
                 self._append_tool_result_message(state, tool_result)
             return None
@@ -753,7 +764,7 @@ class AgentLoop:
             state, ExecutionStatus.COMPLETED, tool_context, final_response=normalized.content
         )
 
-    def _execute_tool_sync(self, tool_call, tool_context, trace_id, parent_span_id, execution_id, iteration):
+    def _execute_tool_sync(self, tool_call, tool_context, trace_id, parent_span_id, execution_id, iteration, *, tool_retry_policy: RetryPolicy | None = None):
         if self._tool_executor is None:
             return ToolResult(
                 tool_call_id=tool_call.id,
@@ -769,9 +780,10 @@ class AgentLoop:
             parent_span_id=parent_span_id,
             execution_id=execution_id,
             iteration=iteration,
+            tool_retry_policy=tool_retry_policy,
         )
 
-    async def _execute_tool_async(self, tool_call, tool_context, trace_id, parent_span_id, execution_id, iteration):
+    async def _execute_tool_async(self, tool_call, tool_context, trace_id, parent_span_id, execution_id, iteration, *, tool_retry_policy: RetryPolicy | None = None):
         if self._tool_executor is None:
             return ToolResult(
                 tool_call_id=tool_call.id,
@@ -787,6 +799,7 @@ class AgentLoop:
             parent_span_id=parent_span_id,
             execution_id=execution_id,
             iteration=iteration,
+            tool_retry_policy=tool_retry_policy,
         )
 
     @staticmethod
