@@ -50,6 +50,7 @@ agent-orchestrator/
 │   │   └── models.py
 │   ├── tools/
 │   │   ├── __init__.py
+│   │   ├── executor.py
 │   │   ├── models.py
 │   │   ├── registry.py
 │   │   └── validator.py
@@ -67,6 +68,7 @@ agent-orchestrator/
 │   ├── test_exceptions.py
 │   ├── test_provider_models.py
 │   ├── test_state_models.py
+│   ├── test_tool_executor.py
 │   ├── test_tool_integration.py
 │   ├── test_tool_models.py
 │   ├── test_tool_registry.py
@@ -117,13 +119,33 @@ Implemented in M2:
 - Unit and integration tests covering registry, validator, and their combined
   behavior.
 
+## Current Scope (Milestone 3 — Complete)
+
+Implemented in M3:
+
+- `ToolExecutor` for tool execution: retrieves a registered tool, validates
+  arguments before execution, invokes the handler, and returns a `ToolResult`
+  (success with output, or failure with preserved error information on
+  validation/lookup, handler, timeout, or execution-limit failures).
+  - Synchronous `execute()` and asynchronous `execute_async()` (sync and async
+    handlers; sync handlers run in a worker thread to keep the event loop
+    responsive).
+  - Configurable per-call timeout for async execution, defaulting to
+    `OrchestratorConfig.tool_timeout`; timeouts produce failed results and
+    cancel async tasks appropriately.
+  - Per-session execution safeguards via `ExecutionContext` (explicit, no
+    global state): tracks tool call count and enforces
+    `OrchestratorConfig.max_tool_calls` consistently for sync/async; fresh
+    sessions via `new_context()`. Failed executions count toward the limit.
+- Provider-independent; no retries, parallel batch execution, or orchestration.
+
 ### Planned but NOT implemented
 
-- Tool execution.
 - Actual orchestration / agent loop execution engine.
 - Concrete provider implementations (OpenAI, Anthropic, etc.).
+- Automatic retries and parallel batch execution.
 - Tool discovery.
-- State persistence, database integration, or conversation management.
+- State persistence, database integration, conversation, or agent memory.
 - Streaming support.
 - Tracing and observability integrations.
 

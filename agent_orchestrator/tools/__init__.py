@@ -1,5 +1,6 @@
 """Tool contracts for the Agent Orchestrator."""
 
+from agent_orchestrator.tools.executor import ExecutionContext, ToolExecutor
 from agent_orchestrator.tools.models import ToolCall, ToolDefinition, ToolResult
 from agent_orchestrator.tools.registry import RegisteredTool, ToolRegistry
 from agent_orchestrator.tools.validator import ToolValidator
@@ -11,4 +12,6 @@ __all__ = [
     "RegisteredTool",
     "ToolRegistry",
     "ToolValidator",
+    "ToolExecutor",
+    "ExecutionContext",
 ]
