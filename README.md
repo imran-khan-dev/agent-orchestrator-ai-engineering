@@ -232,8 +232,51 @@ print(result.status, result.final_response)
   hardened handling of provider/response/tool failures and edge cases.
 - No concrete provider SDK integrations.
 
+
+## Current Scope (Milestone 6.1 — Retry Policy and Configuration, Complete)
+
+- `RetryPolicy` (provider-independent, reusable): `max_attempts` (total,
+  including initial; default 1), `initial_delay`/`max_delay` (seconds),
+  `backoff_multiplier`, optional `jitter`, and optional `retry_on` exception
+  types. Validated (>=1 attempt, non-negative delays, positive multiplier,
+  `max_delay >= initial_delay`); **default preserves behavior (one attempt, no
+  retries)**.
+- Decision/delay helpers (no sleeping, no execution retries, no exception
+  suppression): `allows_retry`, `is_retryable`, `should_retry`, and
+  `next_delay(retry_number, rand=None)` with exponential backoff, `max_delay`
+  cap, and deterministic jitter via injectable random source.
+- `OrchestratorConfig.retry_policy` defaults to `RetryPolicy()` (backward
+  compatible), enabling future independent provider/tool retry policies.
+
+## Current Scope (Milestone 6.2 — Provider Retry Integration, Complete)
+
+- `AgentLoop` applies `RetryPolicy` to provider calls in `run()`/`run_async()`
+  (supports `complete()` and optional `complete_async()`; sync-only providers run
+  in a worker thread on the async path). Retries occur only for eligible
+  exceptions; successful/malformed responses and tool execution failures are not
+  retried. Cancellation/process-control exceptions (`asyncio.CancelledError`,
+  `KeyboardInterrupt`, `SystemExit`) are not retried.
+- Execution: initial attempt then retries per policy using `time.sleep()`
+  (sync) or `asyncio.sleep()` (async) with delays from `RetryPolicy.next_delay()`;
+  no sleep after the final failed attempt. Same logical request/conversation
+  history is preserved across attempts; only the provider operation is retried.
+  On exhaustion, existing provider error/failure behavior is preserved.
+- Configuration: default via `OrchestratorConfig.retry_policy`; optional
+  `OrchestratorConfig.provider_retry_policy` and per-call `provider_retry_policy`
+  overrides (backward compatible). Tool retry config remains separate.
+- Tracing (best-effort, never affects execution): emits `provider.attempt.started`,
+  `provider.attempt.failed`, `provider.attempt.succeeded`, and
+  `provider.retry.scheduled` with safe metadata (attempt, max_attempts, delay,
+  error_type) when a tracer is present.
+
 ## Planned but NOT implemented
 
+- Tool retry execution integration in `ToolExecutor`.
+- Concrete provider implementations (OpenAI, Anthropic, etc.).
+- Parallel tool/batch execution.
+- Tool discovery.
+- State persistence, database integration, conversation, or agent memory.
+- Streaming support.
 - Concrete provider implementations (OpenAI, Anthropic, etc.).
 - Parallel tool/batch execution.
 - Tool discovery.

@@ -489,7 +489,6 @@ class AgentLoop:
                     self._end_span(span_id, trace_id, SpanStatus.ERROR)
                     raise
         except Exception:
-            # Ensure span closure on any unexpected path.
             try:
                 self._end_span(span_id, trace_id, SpanStatus.ERROR)
             except Exception:
@@ -660,7 +659,6 @@ class AgentLoop:
                 metadata["delay"] = delay
             if error is not None:
                 metadata["error_type"] = type(error).__name__
-            # Prefer execution trace/span context when available.
             ev_trace = trace_id or "provider-retry"
             ev_span = span_id or "provider-retry"
             try:
