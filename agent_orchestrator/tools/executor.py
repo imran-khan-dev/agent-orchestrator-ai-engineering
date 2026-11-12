@@ -70,6 +70,12 @@ class ToolExecutor:
             self._consume(context)
             registered = self._prepare(tool_call)
             output = registered.handler(**tool_call.arguments)
+            if inspect.isawaitable(output):
+                if inspect.iscoroutine(output):
+                    output.close()
+                raise TypeError(
+                    "Async tool handlers require execute_async()."
+                )
             return self._success(tool_call, output)
         except Exception as exc:
             return self._failure(tool_call, exc)

@@ -4,6 +4,7 @@ A provider-independent tool-calling and execution engine for AI applications.
 """
 
 from agent_orchestrator.config import OrchestratorConfig
+from agent_orchestrator.core.loop import AgentLoop, IterationDecision, IterationOutcome
 from agent_orchestrator.core.models import ExecutionResult, ExecutionStatus
 from agent_orchestrator.exceptions import (
     ConfigurationError,
@@ -26,6 +27,9 @@ from agent_orchestrator.tools.validator import ToolValidator
 
 __all__ = [
     "OrchestratorConfig",
+    "AgentLoop",
+    "IterationDecision",
+    "IterationOutcome",
     "ExecutionResult",
     "ExecutionStatus",
     "AgentState",
