@@ -246,7 +246,7 @@ class ToolExecutor:
                     )
                     try:
                         output = invoke(registered.handler, tool_call.arguments)
-                    except Exception as exc:
+                    except BaseException as exc:
                         self._record_retry_event(
                             "tool.attempt.failed",
                             trace_id,
@@ -259,8 +259,9 @@ class ToolExecutor:
                             error=exc,
                         )
                         if self._is_process_control_exception(exc):
+                            status = SpanStatus.ERROR
                             raise
-                        if self._should_retry_tool_exception(policy, attempt, exc):
+                        if isinstance(exc, Exception) and self._should_retry_tool_exception(policy, attempt, exc):
                             delay = float(policy.next_delay(attempt))
                             self._record_retry_event(
                                 "tool.retry.scheduled",
@@ -279,18 +280,21 @@ class ToolExecutor:
                                 time.sleep(delay)
                             attempt += 1
                             continue
-                        status = self._status_for_exception(exc)
-                        self._record_tool_event(
-                            self._failure_event_type(exc),
-                            trace_id,
-                            span_id,
-                            tool_call,
-                            execution_id,
-                            iteration,
-                            {"success": False, "error_type": type(exc).__name__},
-                        )
-                        result = self._failure(tool_call, exc)
-                        break
+                        if isinstance(exc, Exception):
+                            status = self._status_for_exception(exc)
+                            self._record_tool_event(
+                                self._failure_event_type(exc),
+                                trace_id,
+                                span_id,
+                                tool_call,
+                                execution_id,
+                                iteration,
+                                {"success": False, "error_type": type(exc).__name__},
+                            )
+                            result = self._failure(tool_call, exc)
+                            break
+                        status = SpanStatus.ERROR
+                        raise
                     else:
                         self._record_retry_event(
                             "tool.attempt.succeeded",
@@ -313,7 +317,7 @@ class ToolExecutor:
                         )
                         result = self._success(tool_call, output)
                         break
-        except Exception:
+        except BaseException:
             status = SpanStatus.ERROR
             raise
         finally:
@@ -380,7 +384,7 @@ class ToolExecutor:
                         output = await self._invoke_async(
                             registered.handler, tool_call.arguments, timeout
                         )
-                    except Exception as exc:
+                    except BaseException as exc:
                         self._record_retry_event(
                             "tool.attempt.failed",
                             trace_id,
@@ -393,8 +397,9 @@ class ToolExecutor:
                             error=exc,
                         )
                         if self._is_process_control_exception(exc):
+                            status = SpanStatus.ERROR
                             raise
-                        if self._should_retry_tool_exception(policy, attempt, exc):
+                        if isinstance(exc, Exception) and self._should_retry_tool_exception(policy, attempt, exc):
                             delay = float(policy.next_delay(attempt))
                             self._record_retry_event(
                                 "tool.retry.scheduled",
@@ -413,18 +418,21 @@ class ToolExecutor:
                                 await asyncio.sleep(delay)
                             attempt += 1
                             continue
-                        status = self._status_for_exception(exc)
-                        self._record_tool_event(
-                            self._failure_event_type(exc),
-                            trace_id,
-                            span_id,
-                            tool_call,
-                            execution_id,
-                            iteration,
-                            {"success": False, "error_type": type(exc).__name__},
-                        )
-                        result = self._failure(tool_call, exc)
-                        break
+                        if isinstance(exc, Exception):
+                            status = self._status_for_exception(exc)
+                            self._record_tool_event(
+                                self._failure_event_type(exc),
+                                trace_id,
+                                span_id,
+                                tool_call,
+                                execution_id,
+                                iteration,
+                                {"success": False, "error_type": type(exc).__name__},
+                            )
+                            result = self._failure(tool_call, exc)
+                            break
+                        status = SpanStatus.ERROR
+                        raise
                     else:
                         self._record_retry_event(
                             "tool.attempt.succeeded",
@@ -447,7 +455,7 @@ class ToolExecutor:
                         )
                         result = self._success(tool_call, output)
                         break
-        except Exception:
+        except BaseException:
             status = SpanStatus.ERROR
             raise
         finally:
@@ -471,7 +479,11 @@ class ToolExecutor:
             return await asyncio.wait_for(handler(**arguments), timeout=timeout)
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(None, lambda: handler(**arguments))
-        return await asyncio.wait_for(future, timeout=timeout)
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            future.cancel()
+            raise
 
     @staticmethod
     def _consume(context: ExecutionContext | None) -> None:

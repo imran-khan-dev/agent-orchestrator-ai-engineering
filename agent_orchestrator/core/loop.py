@@ -206,6 +206,18 @@ class AgentLoop:
             self._emit_completion_events(trace_id, root_span, result[1])
             self._end_span(root_span, trace_id, self._status_for_result(result[1]))
             return result
+        except asyncio.CancelledError:
+            try:
+                self._record_event(
+                    "agent.execution.failed", trace_id, root_span, "agent_loop", {"execution_id": trace_id}
+                )
+            except Exception:
+                pass
+            try:
+                self._end_span(root_span, trace_id, SpanStatus.ERROR)
+            except Exception:
+                pass
+            raise
         except Exception as exc:
             res = self._finish(
                 state,
@@ -289,6 +301,9 @@ class AgentLoop:
                 if inspect.isawaitable(outcome):
                     outcome = await outcome
                 terminal = self._apply_outcome(state, tool_context, outcome)
+            except asyncio.CancelledError:
+                self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                raise
             except Exception:
                 self._end_span(iter_span, trace_id, SpanStatus.ERROR)
                 raise
@@ -387,6 +402,9 @@ class AgentLoop:
                     state, tool_context, response, trace_id, iter_span, state.iteration_count,
                     tool_retry_policy=tool_retry_policy,
                 )
+            except asyncio.CancelledError:
+                self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                raise
             except Exception:
                 self._end_span(iter_span, trace_id, SpanStatus.ERROR)
                 raise
@@ -526,6 +544,7 @@ class AgentLoop:
             {"execution_id": trace_id, "iteration": iteration},
         )
         attempt = 1
+        span_ended = False
         try:
             while True:
                 try:
@@ -557,7 +576,25 @@ class AgentLoop:
                         },
                     )
                     self._end_span(span_id, trace_id, SpanStatus.OK)
+                    span_ended = True
                     return response
+                except asyncio.CancelledError as exc:
+                    self._record_retry_event(
+                        "provider.attempt.failed",
+                        attempt,
+                        policy.max_attempts,
+                        error=exc,
+                        trace_id=trace_id,
+                        span_id=span_id,
+                    )
+                    self._record_event(
+                        "provider.request.failed",
+                        trace_id,
+                        span_id,
+                        "provider",
+                        {"execution_id": trace_id, "iteration": iteration},
+                    )
+                    raise
                 except Exception as exc:
                     self._record_retry_event(
                         "provider.attempt.failed",
@@ -575,7 +612,6 @@ class AgentLoop:
                             "provider",
                             {"execution_id": trace_id, "iteration": iteration},
                         )
-                        self._end_span(span_id, trace_id, SpanStatus.ERROR)
                         raise
                     if policy.should_retry(attempt, exc):
                         delay = float(policy.next_delay(attempt))
@@ -600,13 +636,13 @@ class AgentLoop:
                         "provider",
                         {"execution_id": trace_id, "iteration": iteration},
                     )
-                    self._end_span(span_id, trace_id, SpanStatus.ERROR)
                     raise
-        except Exception:
-            try:
-                self._end_span(span_id, trace_id, SpanStatus.ERROR)
-            except Exception:
-                pass
+        except BaseException:
+            if not span_ended:
+                try:
+                    self._end_span(span_id, trace_id, SpanStatus.ERROR)
+                except Exception:
+                    pass
             raise
 
     async def _complete_async(

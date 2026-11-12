@@ -296,6 +296,23 @@ print(result.status, result.final_response)
   with safe metadata (attempt, max_attempts, retry_number, delay, error_type,
   tool/trace identifiers) when a tracer is present.
 
+## Current Scope (Milestone 6.4 — Async Cancellation and Cleanup, Complete)
+
+- `run_async()` propagates `asyncio.CancelledError` instead of converting it into
+  a normal failed `ExecutionResult`. Cancellation is treated as process-control
+  flow (not retried) during async provider execution, async tool execution, and
+  retry backoff delays (`asyncio.sleep`).
+- Best-effort cleanup/finalization on cancellation: open tracing spans
+  (agent/iteration/provider/tool) are ended with `ERROR` status and relevant
+  failure events are recorded when possible (including cancelled tool spans in
+  `ToolExecutor`); cleanup does not swallow cancellation. Synchronous execution
+  paths (`run`, sync `execute`) remain unchanged.
+- Async tool execution cancels the in-flight executor future on timeout/cancel
+  paths to avoid orphaned background work in the wrapper; sync handlers run in a
+  worker thread via `run_in_executor` (thread cannot be force-stopped, but the
+  awaiting task no longer blocks on it after timeout/cancel handling). Provider
+  request spans are finalized once per terminal path.
+
 ## Planned but NOT implemented
 
 - Per-run `AgentLoop` tool retry policy override API (executor/config defaults
