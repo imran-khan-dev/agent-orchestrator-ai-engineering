@@ -20,6 +20,8 @@ from agent_orchestrator.providers.base import LLMProvider
 from agent_orchestrator.providers.models import ProviderRequest, ProviderResponse
 from agent_orchestrator.state.models import AgentState
 from agent_orchestrator.tools.models import ToolCall, ToolDefinition, ToolResult
+from agent_orchestrator.tools.registry import RegisteredTool, ToolRegistry
+from agent_orchestrator.tools.validator import ToolValidator
 
 __all__ = [
     "OrchestratorConfig",
@@ -32,6 +34,9 @@ __all__ = [
     "ToolCall",
     "ToolDefinition",
     "ToolResult",
+    "RegisteredTool",
+    "ToolRegistry",
+    "ToolValidator",
     "OrchestratorError",
     "ConfigurationError",
     "ToolError",

@@ -50,7 +50,9 @@ agent-orchestrator/
 │   │   └── models.py
 │   ├── tools/
 │   │   ├── __init__.py
-│   │   └── models.py
+│   │   ├── models.py
+│   │   ├── registry.py
+│   │   └── validator.py
 │   ├── providers/
 │   │   ├── __init__.py
 │   │   ├── base.py
@@ -65,7 +67,10 @@ agent-orchestrator/
 │   ├── test_exceptions.py
 │   ├── test_provider_models.py
 │   ├── test_state_models.py
-│   └── test_tool_models.py
+│   ├── test_tool_integration.py
+│   ├── test_tool_models.py
+│   ├── test_tool_registry.py
+│   └── test_tool_validator.py
 ├── examples/
 │   └── .gitkeep
 ├── README.md
@@ -81,7 +86,7 @@ Implemented in M1:
 
 - Package structure and configuration (`pyproject.toml`, `requirements.txt`).
 - Editable-installable package layout.
-- Pydantic and pytest declared as dependencies.
+- Pydantic and pytest declared as dependencies (plus `jsonschema` for tool argument validation).
 - Configured pytest test paths.
 - `OrchestratorConfig` with validated execution settings.
 - Tool contracts: `ToolDefinition`, `ToolCall`, `ToolResult`.
@@ -94,11 +99,30 @@ Implemented in M1:
 - Unit tests covering configuration, tools, providers, execution/state models,
   and exceptions.
 
+## Current Scope (Milestone 2 — Complete)
+
+Implemented in M2:
+
+- `ToolRegistry` for registering, retrieving, listing, and unregistering tools
+  (definition + handler pairs) **without executing them**.
+- Registry validation: rejects duplicate tool names, unknown lookups, and
+  non-callable handlers.
+- `ToolValidator` for validating tool argument dictionaries against
+  `ToolDefinition.parameters_schema` using JSON Schema (`jsonschema`), with
+  useful `ToolValidationError` messages and schema validation.
+- Integrated tool management: `ToolRegistry.validate_arguments(name, arguments)`
+  validates arguments for a registered tool using its definition and
+  `ToolValidator`, and `get_all_definitions()` returns definitions suitable for
+  LLM provider requests. Tool execution remains outside this layer.
+- Unit and integration tests covering registry, validator, and their combined
+  behavior.
+
 ### Planned but NOT implemented
 
+- Tool execution.
 - Actual orchestration / agent loop execution engine.
 - Concrete provider implementations (OpenAI, Anthropic, etc.).
-- Tool registry, tool execution, or tool discovery.
+- Tool discovery.
 - State persistence, database integration, or conversation management.
 - Streaming support.
 - Tracing and observability integrations.
