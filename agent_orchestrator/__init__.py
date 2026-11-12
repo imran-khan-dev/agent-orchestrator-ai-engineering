@@ -19,6 +19,7 @@ from agent_orchestrator.exceptions import (
 )
 from agent_orchestrator.providers.base import LLMProvider
 from agent_orchestrator.providers.models import ProviderRequest, ProviderResponse
+from agent_orchestrator.retry import RetryPolicy
 from agent_orchestrator.state.models import AgentState
 from agent_orchestrator.tools.executor import ExecutionContext, ToolExecutor
 from agent_orchestrator.tools.models import ToolCall, ToolDefinition, ToolResult
@@ -45,6 +46,7 @@ __all__ = [
     "LLMProvider",
     "ProviderRequest",
     "ProviderResponse",
+    "RetryPolicy",
     "ToolCall",
     "ToolDefinition",
     "ToolResult",

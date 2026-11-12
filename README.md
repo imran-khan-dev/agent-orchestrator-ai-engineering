@@ -47,6 +47,7 @@ agent-orchestrator/
 │   ├── __init__.py
 │   ├── config.py
 │   ├── exceptions.py
+│   ├── retry.py
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── loop.py
@@ -77,6 +78,8 @@ agent-orchestrator/
 │   ├── test_core_models.py
 │   ├── test_exceptions.py
 │   ├── test_provider_models.py
+│   ├── test_provider_retry.py
+│   ├── test_retry_policy.py
 │   ├── test_state_models.py
 │   ├── test_tool_executor.py
 │   ├── test_tool_integration.py
@@ -150,6 +153,12 @@ or corrupting history.
 - `max_tool_calls` (default 20): per-session tool execution limit enforced via
   `ExecutionContext` (failed/attempted executions count; independent per run).
 - `enable_tracing` (default True).
+- `retry_policy` (default `RetryPolicy()`): shared/default retry contract
+  (`max_attempts`, delays/backoff, `jitter`, `retry_on`). Default is a single
+  attempt with no retries.
+- `provider_retry_policy` (default `None`): optional provider-specific override;
+  when `None`, provider calls use `retry_policy`. Can also be overridden per
+  `run()`/`run_async()` call. Tool retry configuration remains separate.
 
 ## Basic Usage Example
 
@@ -223,104 +232,47 @@ print(result.status, result.final_response)
   hardened handling of provider/response/tool failures and edge cases.
 - No concrete provider SDK integrations.
 
-## Current Scope (Milestone 5 — Complete)
+## Current Scope (Milestone 6.1 — Retry Policy and Configuration, Complete)
 
-Provider-independent, in-memory tracing integrated end-to-end:
+- `RetryPolicy` (provider-independent, reusable): `max_attempts` (total,
+  including initial; default 1), `initial_delay`/`max_delay` (seconds),
+  `backoff_multiplier`, optional `jitter`, and optional `retry_on` exception
+  types. Validated (>=1 attempt, non-negative delays, positive multiplier,
+  `max_delay >= initial_delay`); **default preserves behavior (one attempt, no
+  retries)**.
+- Decision/delay helpers (no sleeping, no execution retries, no exception
+  suppression): `allows_retry`, `is_retryable`, `should_retry`, and
+  `next_delay(retry_number, rand=None)` with exponential backoff, `max_delay`
+  cap, and deterministic jitter via injectable random source.
+- `OrchestratorConfig.retry_policy` defaults to `RetryPolicy()` (backward
+  compatible), enabling future independent provider/tool retry policies.
 
-- **Contracts:** `ExecutionEvent`, `Span`, `SpanStatus`, `Trace`, `Tracer`
-  protocol (`record(event)`), and `NoOpTracer` (disabled tracing without
-  conditional spread). Reuses `OrchestratorConfig.enable_tracing` (default
-  `True`).
-- **Collection:** thread-safe `InMemoryTracer` (satisfies `Tracer`) records
-  ordered events and manages span lifecycles (`start_span`/`end_span`,
-  parent-child, UTC timestamps, `span_duration` from timestamps). Retrieval
-  returns copies (`get_events`, `get_trace`, `list_traces`); unknown traces
-  return `None`/empty results.
-- **Instrumentation:** `AgentLoop` and `ToolExecutor` emit lifecycle events/spans
-  (one trace per execution, `trace_id == execution_id`): agent
-  start/completion/failure/max-iterations/final answer, iterations, provider
-  request/response, and tool execution (start/completion/failure, validation
-  failure, timeout) with safe metadata (tool name/call ID, execution
-  ID/iteration, status/duration) — **no raw prompts, tool args/outputs, or
-  secrets by default**. Malformed/duplicate tool calls handled by the loop emit
-  lifecycle events (no invented tool-execution spans). Sync/async paths are
-  consistent; spans close `OK`/`ERROR` on all terminal paths.
-- **Integration:** `AgentLoop(config=None, tool_executor=None, tracer=None)`
-  accepts an injected `Tracer`; defaults to `InMemoryTracer` when tracing is
-  enabled or `NoOpTracer` when `enable_tracing=False`, and shares the tracer
-  with `ToolExecutor` to avoid conflicting instances. Tracer exceptions never
-  affect execution results.
+## Current Scope (Milestone 6.2 — Provider Retry Integration, Complete)
 
-### Example: inject tracer and retrieve a trace
-
-```python
-from agent_orchestrator import (
-    AgentLoop,
-    InMemoryTracer,
-    OrchestratorConfig,
-    ProviderRequest,
-    ProviderResponse,
-    SpanStatus,
-    ToolDefinition,
-    ToolExecutor,
-    ToolRegistry,
-)
-
-registry = ToolRegistry()
-registry.register(
-    ToolDefinition(
-        name="add",
-        description="Add two integers",
-        parameters_schema={
-            "type": "object",
-            "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
-            "required": ["a", "b"],
-        },
-    ),
-    lambda a, b: a + b,
-)
-
-tracer = InMemoryTracer()
-loop = AgentLoop(
-    config=OrchestratorConfig(enable_tracing=True),
-    tool_executor=ToolExecutor(registry),
-    tracer=tracer,  # custom injection; shared with ToolExecutor
-)
-
-class MyProvider:
-    def complete(self, request: ProviderRequest) -> ProviderResponse:
-        return ProviderResponse(content="done")
-
-state, result = loop.run(
-    messages=[{"role": "user", "content": "What is 2+3?"}],
-    provider=MyProvider(),
-)
-
-trace = tracer.get_trace(result.execution_id)   # None if unknown trace ID
-events = tracer.get_events(result.execution_id) # ordered; empty if unknown
-for span in (trace.spans if trace else []):
-    duration = InMemoryTracer.span_duration(span)
-    print(span.name, span.status.value, duration)
-```
-
-- **Disable tracing:** `AgentLoop(config=OrchestratorConfig(enable_tracing=False))`
-  uses `NoOpTracer` and records no events/spans.
-- **Custom tracer:** pass any `Tracer` (`record(event)`) implementation; lifecycle
-  span methods are used when available. Tracing failures are isolated from
-  execution.
-
-### Limitations
-
-- In-memory, process-local collection only (no persistence/export); unbounded
-  growth without external retention.
-- Lifecycle-level events (not exhaustive internal operations); no external
-  observability integrations (e.g. OpenTelemetry).
+- `AgentLoop` applies `RetryPolicy` to provider calls in `run()`/`run_async()`
+  (supports `complete()` and optional `complete_async()`; sync-only providers run
+  in a worker thread on the async path). Retries occur only for eligible
+  exceptions; successful/malformed responses and tool execution failures are not
+  retried. Cancellation/process-control exceptions (`asyncio.CancelledError`,
+  `KeyboardInterrupt`, `SystemExit`) are not retried.
+- Execution: initial attempt then retries per policy using `time.sleep()`
+  (sync) or `asyncio.sleep()` (async) with delays from `RetryPolicy.next_delay()`;
+  no sleep after the final failed attempt. Same logical request/conversation
+  history is preserved across attempts; only the provider operation is retried.
+  On exhaustion, existing provider error/failure behavior is preserved.
+- Configuration: default via `OrchestratorConfig.retry_policy`; optional
+  `OrchestratorConfig.provider_retry_policy` and per-call `provider_retry_policy`
+  overrides (backward compatible). Tool retry config remains separate.
+- Tracing (best-effort, never affects execution): emits `provider.attempt.started`,
+  `provider.attempt.failed`, `provider.attempt.succeeded`, and
+  `provider.retry.scheduled` with safe metadata (attempt, max_attempts, delay,
+  error_type) when a tracer is present.
 
 ## Planned but NOT implemented
 
-- Trace persistence/export and external observability integrations (e.g. OpenTelemetry).
+- Tool retry execution integration in `ToolExecutor`.
 - Concrete provider implementations (OpenAI, Anthropic, etc.).
-- Automatic retries and parallel tool/batch execution.
+- Parallel tool/batch execution.
 - Tool discovery.
 - State persistence, database integration, conversation, or agent memory.
 - Streaming support.

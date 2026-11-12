@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
@@ -21,6 +22,7 @@ from agent_orchestrator.config import OrchestratorConfig
 from agent_orchestrator.core.models import ExecutionResult, ExecutionStatus
 from agent_orchestrator.providers.base import LLMProvider
 from agent_orchestrator.providers.models import ProviderRequest, ProviderResponse
+from agent_orchestrator.retry import RetryPolicy
 from agent_orchestrator.state.models import AgentState
 from agent_orchestrator.tools.executor import ExecutionContext, ToolExecutor
 from agent_orchestrator.tools.models import ToolCall, ToolDefinition, ToolResult
@@ -98,6 +100,7 @@ class AgentLoop:
         step: IterationStep | None = None,
         provider: LLMProvider | None = None,
         tools: list[ToolDefinition] | None = None,
+        provider_retry_policy: RetryPolicy | None = None,
     ) -> tuple[AgentState, ExecutionResult]:
         """Run an agent execution synchronously.
 
@@ -108,6 +111,7 @@ class AgentLoop:
             provider: Optional LLM provider for provider/tool round trips.
             tools: Optional tool definitions for provider requests; defaults to
                 definitions from the configured tool executor's registry.
+            provider_retry_policy: Optional provider retry policy override.
 
         Returns:
             The final agent state and execution result.
@@ -121,14 +125,12 @@ class AgentLoop:
 
         try:
             if step is not None:
-                result = self._run_with_step(state, tool_context, step, trace_id, root_span)
-            elif provider is not None:
-                result = self._run_with_provider_sync(state, tool_context, provider, tools, trace_id, root_span)
-            else:
-                result = self._run_with_step(state, tool_context, self._default_step, trace_id, root_span)
-            self._emit_completion_events(trace_id, root_span, result[1])
-            self._end_span(root_span, trace_id, self._status_for_result(result[1]))
-            return result
+                return self._run_with_step(state, tool_context, step)
+            if provider is not None:
+                return self._run_with_provider_sync(
+                    state, tool_context, provider, tools, provider_retry_policy
+                )
+            return self._run_with_step(state, tool_context, self._default_step)
         except Exception as exc:
             res = self._finish(
                 state,
@@ -148,6 +150,7 @@ class AgentLoop:
         step: AsyncIterationStep | IterationStep | None = None,
         provider: LLMProvider | None = None,
         tools: list[ToolDefinition] | None = None,
+        provider_retry_policy: RetryPolicy | None = None,
     ) -> tuple[AgentState, ExecutionResult]:
         """Run an agent execution asynchronously.
 
@@ -164,14 +167,12 @@ class AgentLoop:
 
         try:
             if step is not None:
-                result = await self._run_with_step_async(state, tool_context, step, trace_id, root_span)
-            elif provider is not None:
-                result = await self._run_with_provider_async(state, tool_context, provider, tools, trace_id, root_span)
-            else:
-                result = await self._run_with_step_async(state, tool_context, self._default_step, trace_id, root_span)
-            self._emit_completion_events(trace_id, root_span, result[1])
-            self._end_span(root_span, trace_id, self._status_for_result(result[1]))
-            return result
+                return await self._run_with_step_async(state, tool_context, step)
+            if provider is not None:
+                return await self._run_with_provider_async(
+                    state, tool_context, provider, tools, provider_retry_policy
+                )
+            return await self._run_with_step_async(state, tool_context, self._default_step)
         except Exception as exc:
             res = self._finish(
                 state,
@@ -243,24 +244,18 @@ class AgentLoop:
         tool_context: ExecutionContext | None,
         provider: LLMProvider,
         tools: list[ToolDefinition] | None,
-        trace_id: str,
-        parent_span_id: str | None,
+        provider_retry_policy: RetryPolicy | None = None,
     ) -> tuple[AgentState, ExecutionResult]:
         available_tools = self._resolve_tools(tools)
+        policy = self._resolve_provider_retry_policy(provider_retry_policy)
         while True:
             if state.iteration_count >= self._config.max_iterations:
                 return self._max_iterations(state, tool_context)
 
             state.iteration_count += 1
-            iter_span = self._start_span(trace_id, "iteration", "agent_loop", parent_span_id, {"execution_id": trace_id, "iteration": state.iteration_count})
-            self._record_event("agent.iteration.started", trace_id, iter_span, "agent_loop", {"execution_id": trace_id, "iteration": state.iteration_count})
-            try:
-                request = ProviderRequest(messages=list(state.messages), tools=available_tools)
-                response = self._provider_call_sync(provider, request, trace_id, iter_span, state.iteration_count)
-                terminal = self._handle_provider_response_sync(state, tool_context, response, trace_id, iter_span, state.iteration_count)
-            except Exception:
-                self._end_span(iter_span, trace_id, SpanStatus.ERROR)
-                raise
+            request = ProviderRequest(messages=list(state.messages), tools=available_tools)
+            response = self._complete_with_retry_sync(provider, request, policy)
+            terminal = self._handle_provider_response_sync(state, tool_context, response)
             if terminal is not None:
                 self._end_span(iter_span, trace_id, self._status_for_result(terminal[1]))
                 return terminal
@@ -272,24 +267,20 @@ class AgentLoop:
         tool_context: ExecutionContext | None,
         provider: LLMProvider,
         tools: list[ToolDefinition] | None,
-        trace_id: str,
-        parent_span_id: str | None,
+        provider_retry_policy: RetryPolicy | None = None,
     ) -> tuple[AgentState, ExecutionResult]:
         available_tools = self._resolve_tools(tools)
+        policy = self._resolve_provider_retry_policy(provider_retry_policy)
         while True:
             if state.iteration_count >= self._config.max_iterations:
                 return self._max_iterations(state, tool_context)
 
             state.iteration_count += 1
-            iter_span = self._start_span(trace_id, "iteration", "agent_loop", parent_span_id, {"execution_id": trace_id, "iteration": state.iteration_count})
-            self._record_event("agent.iteration.started", trace_id, iter_span, "agent_loop", {"execution_id": trace_id, "iteration": state.iteration_count})
-            try:
-                request = ProviderRequest(messages=list(state.messages), tools=available_tools)
-                response = await self._provider_call_async(provider, request, trace_id, iter_span, state.iteration_count)
-                terminal = await self._handle_provider_response_async(state, tool_context, response, trace_id, iter_span, state.iteration_count)
-            except Exception:
-                self._end_span(iter_span, trace_id, SpanStatus.ERROR)
-                raise
+            request = ProviderRequest(messages=list(state.messages), tools=available_tools)
+            response = await self._complete_with_retry_async(provider, request, policy)
+            terminal = await self._handle_provider_response_async(
+                state, tool_context, response
+            )
             if terminal is not None:
                 self._end_span(iter_span, trace_id, self._status_for_result(terminal[1]))
                 return terminal
@@ -340,6 +331,156 @@ class AgentLoop:
             return result
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, provider.complete, request)
+
+    def _resolve_provider_retry_policy(
+        self, override: RetryPolicy | None
+    ) -> RetryPolicy:
+        if override is not None:
+            return override
+        provider_policy = getattr(self._config, "provider_retry_policy", None)
+        if provider_policy is not None:
+            return provider_policy
+        return getattr(self._config, "retry_policy", RetryPolicy())
+
+    @staticmethod
+    def _is_process_control_exception(exc: BaseException) -> bool:
+        if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            return True
+        name = type(exc).__name__
+        return name in {"CancelledError", "TaskCancelledException"}
+
+    def _complete_with_retry_sync(
+        self, provider: LLMProvider, request: ProviderRequest, policy: RetryPolicy
+    ) -> ProviderResponse:
+        attempt = 1
+        while True:
+            try:
+                self._record_retry_event("provider.attempt.started", attempt, policy.max_attempts)
+                response = provider.complete(request)
+                self._record_retry_event(
+                    "provider.attempt.succeeded", attempt, policy.max_attempts
+                )
+                return response
+            except Exception as exc:
+                if self._is_process_control_exception(exc):
+                    self._record_retry_event(
+                        "provider.attempt.failed", attempt, policy.max_attempts, error=exc
+                    )
+                    raise
+                if policy.should_retry(attempt, exc):
+                    retry_number = attempt
+                    delay = float(policy.next_delay(retry_number))
+                    self._record_retry_event(
+                        "provider.attempt.failed", attempt, policy.max_attempts, error=exc
+                    )
+                    self._record_retry_event(
+                        "provider.retry.scheduled",
+                        attempt,
+                        policy.max_attempts,
+                        error=exc,
+                        delay=delay,
+                        retry_number=retry_number,
+                    )
+                    if delay > 0:
+                        time.sleep(delay)
+                    attempt += 1
+                    continue
+                self._record_retry_event(
+                    "provider.attempt.failed", attempt, policy.max_attempts, error=exc
+                )
+                raise
+
+    async def _complete_with_retry_async(
+        self, provider: LLMProvider, request: ProviderRequest, policy: RetryPolicy
+    ) -> ProviderResponse:
+        attempt = 1
+        while True:
+            try:
+                self._record_retry_event("provider.attempt.started", attempt, policy.max_attempts)
+                response = await self._complete_async(provider, request)
+                self._record_retry_event(
+                    "provider.attempt.succeeded", attempt, policy.max_attempts
+                )
+                return response
+            except Exception as exc:
+                if self._is_process_control_exception(exc):
+                    self._record_retry_event(
+                        "provider.attempt.failed", attempt, policy.max_attempts, error=exc
+                    )
+                    raise
+                if policy.should_retry(attempt, exc):
+                    retry_number = attempt
+                    delay = float(policy.next_delay(retry_number))
+                    self._record_retry_event(
+                        "provider.attempt.failed", attempt, policy.max_attempts, error=exc
+                    )
+                    self._record_retry_event(
+                        "provider.retry.scheduled",
+                        attempt,
+                        policy.max_attempts,
+                        error=exc,
+                        delay=delay,
+                        retry_number=retry_number,
+                    )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+                self._record_retry_event(
+                    "provider.attempt.failed", attempt, policy.max_attempts, error=exc
+                )
+                raise
+
+    def _record_retry_event(
+        self,
+        event_type: str,
+        attempt: int,
+        max_attempts: int,
+        error: BaseException | None = None,
+        delay: float | None = None,
+        retry_number: int | None = None,
+    ) -> None:
+        # Tracing is best-effort and optional; must not affect retries/results.
+        try:
+            tracer = getattr(self, "_tracer", None) or getattr(self, "tracer", None)
+            if tracer is None:
+                return
+            record = getattr(tracer, "record", None)
+            if not callable(record):
+                return
+            metadata: dict[str, Any] = {
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+            }
+            if retry_number is not None:
+                metadata["retry_number"] = retry_number
+            if delay is not None:
+                metadata["delay"] = delay
+            if error is not None:
+                metadata["error_type"] = type(error).__name__
+            # Use minimal ExecutionEvent-like object if tracing models are present;
+            # otherwise pass a plain dict to tolerant tracers.
+            try:
+                from agent_orchestrator.tracing.models import ExecutionEvent  # type: ignore
+
+                event = ExecutionEvent(
+                    event_type=event_type,
+                    trace_id="provider-retry",
+                    span_id="provider-retry",
+                    component="provider",
+                    metadata=metadata,
+                )
+                record(event)
+            except Exception:
+                record(
+                    {
+                        "event_type": event_type,
+                        "component": "provider",
+                        "metadata": metadata,
+                    }
+                )
+        except Exception:
+            return
 
     def _handle_provider_response_sync(
         self,

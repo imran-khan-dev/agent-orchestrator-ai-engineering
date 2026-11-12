@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from agent_orchestrator.retry import RetryPolicy
+
 
 class OrchestratorConfig(BaseModel):
     """Validated execution settings for the orchestrator.
@@ -21,6 +23,14 @@ class OrchestratorConfig(BaseModel):
     max_tool_calls: int = Field(default=20, gt=0, description="Maximum number of tool calls per run.")
     enable_tracing: bool = Field(
         default=True, description="Whether tracing/observability hooks are enabled."
+    )
+    retry_policy: RetryPolicy = Field(
+        default_factory=RetryPolicy,
+        description="Default retry policy (one attempt, no retries unless configured).",
+    )
+    provider_retry_policy: RetryPolicy | None = Field(
+        default=None,
+        description="Optional provider-specific retry policy override; defaults to retry_policy.",
     )
 
     @field_validator("max_iterations", "max_tool_calls")
