@@ -1,0 +1,128 @@
+Metadata-Version: 2.4
+Name: agent-orchestrator
+Version: 0.1.0
+Summary: Provider-independent tool-calling and execution engine for AI applications
+Author: Agent Orchestrator Contributors
+License: MIT
+Keywords: ai,orchestrator,tool-calling,llm,agents
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic>=2.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+
+# Agent Orchestrator
+
+A provider-independent tool-calling and execution engine for AI applications.
+
+## What It Is
+
+**Agent Orchestrator** is a standalone, reusable Python package that provides a
+provider-independent tool-calling and execution engine. It gives developers a
+clean foundation for building AI agents that can reason, call tools, and
+maintain state — without being locked into any specific LLM provider or tool
+framework.
+
+## Purpose
+
+Modern AI applications need to orchestrate LLMs with tool use, but most
+solutions are tightly coupled to a single provider (OpenAI, Anthropic, Groq,
+Ollama, etc.). This makes it difficult to:
+
+- Swap providers without rewriting tool-calling logic.
+- Reuse tool definitions across different applications.
+- Test orchestration logic in isolation.
+- Maintain a consistent execution model across projects.
+
+Agent Orchestrator solves this by providing normalized, provider-agnostic
+contracts for tools, provider requests/responses, execution results, and
+agent state.
+
+## Architecture
+
+- **Provider-independent**: The core package does not depend on any specific
+  LLM provider. Concrete providers will implement a simple `LLMProvider`
+  protocol in a later milestone.
+- **Tool-independent**: Tool definitions, calls, and results will be normalized
+  data models — no registration or execution logic is bundled.
+- **Minimal and focused**: Each model has a single responsibility. No
+  unnecessary abstractions or hidden coupling.
+- **Testable**: All contracts will be pure data models that can be unit-tested
+  in isolation without network access or external services.
+
+## Project Structure
+
+```text
+agent-orchestrator/
+├── agent_orchestrator/
+│   ├── __init__.py
+│   ├── config.py
+│   ├── core/
+│   │   └── __init__.py
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   └── models.py
+│   ├── providers/
+│   │   └── __init__.py
+│   └── state/
+│       └── __init__.py
+├── tests/
+│   ├── __init__.py
+│   ├── test_config.py
+│   └── test_tool_models.py
+├── examples/
+│   └── .gitkeep
+├── README.md
+├── pyproject.toml
+├── requirements.txt
+└── .gitignore
+```
+
+## Current Scope (Milestone 1)
+
+This initial release establishes the **project foundation and core contracts**.
+It includes:
+
+- Package structure and configuration (`pyproject.toml`, `requirements.txt`).
+- Editable-installable package layout.
+- Pydantic and pytest declared as dependencies.
+- Configured pytest test paths.
+- `OrchestratorConfig` with validated execution settings.
+- Tool contracts: `ToolDefinition`, `ToolCall`, `ToolResult`.
+- Unit tests covering configuration and tool models.
+
+### Planned but NOT implemented
+
+- Provider interfaces (`LLMProvider` protocol) or concrete provider
+  implementations (OpenAI, Anthropic, etc.).
+- Actual orchestration / agent loop execution engine.
+- Tool registry, tool execution, or tool discovery.
+- State management or state models.
+- State persistence, database integration, or conversation management.
+- Streaming support.
+- Tracing and observability integrations.
+
+## Installation
+
+```bash
+pip install -e .
+```
+
+This installs the package in editable mode so you can develop and test
+locally without rebuilding.
+
+## Running Tests
+
+```bash
+pytest
+```
+
+## License
+
+MIT
