@@ -158,7 +158,11 @@ or corrupting history.
   attempt with no retries.
 - `provider_retry_policy` (default `None`): optional provider-specific override;
   when `None`, provider calls use `retry_policy`. Can also be overridden per
-  `run()`/`run_async()` call. Tool retry configuration remains separate.
+  `run()`/`run_async()` call via `provider_retry_policy`.
+- `tool_retry_policy` (default `None`): optional tool-specific override for
+  `ToolExecutor`; when `None`, tool execution uses `retry_policy`. Can also be
+  overridden per tool execution call via `tool_retry_policy`. Provider and tool
+  retry policies are configured independently.
 
 ## Basic Usage Example
 
@@ -232,6 +236,7 @@ print(result.status, result.final_response)
   hardened handling of provider/response/tool failures and edge cases.
 - No concrete provider SDK integrations.
 
+
 ## Current Scope (Milestone 6.1 — Retry Policy and Configuration, Complete)
 
 - `RetryPolicy` (provider-independent, reusable): `max_attempts` (total,
@@ -268,9 +273,33 @@ print(result.status, result.final_response)
   `provider.retry.scheduled` with safe metadata (attempt, max_attempts, delay,
   error_type) when a tracer is present.
 
+## Current Scope (Milestone 6.3 — Tool Retry Integration, Complete)
+
+- `ToolExecutor` applies `RetryPolicy` to tool handler execution in `execute()`
+  and `execute_async()` (sync handlers run in a worker thread on the async path,
+  bounded by `tool_timeout`). Only eligible handler exceptions are retried;
+  validation/schema/unknown-tool/limit/pre-execution failures are not retried,
+  and cancellation/process-control exceptions (`asyncio.CancelledError`,
+  `KeyboardInterrupt`, `SystemExit`) are not retried.
+- Execution: initial attempt then retries per policy using `time.sleep()` (sync)
+  or `asyncio.sleep()` (async) with delays from `RetryPolicy.next_delay()`; no
+  sleep after the final failed attempt. The same tool call/request context
+  (`tool_call.id`, `tool_call.name`, arguments) is preserved across attempts;
+  on exhaustion the existing structured `ToolResult` failure behavior is preserved.
+- Configuration and precedence: per-call `tool_retry_policy` override →
+  `OrchestratorConfig.tool_retry_policy` → `OrchestratorConfig.retry_policy`.
+  `AgentLoop` currently uses executor/config defaults for tool retries (no
+  per-run `tool_retry_policy` public API parameter) to avoid unnecessary API
+  changes; provider retry remains independently configurable.
+- Tracing (best-effort, never affects execution): emits `tool.attempt.started`,
+  `tool.attempt.failed`, `tool.attempt.succeeded`, and `tool.retry.scheduled`
+  with safe metadata (attempt, max_attempts, retry_number, delay, error_type,
+  tool/trace identifiers) when a tracer is present.
+
 ## Planned but NOT implemented
 
-- Tool retry execution integration in `ToolExecutor`.
+- Per-run `AgentLoop` tool retry policy override API (executor/config defaults
+  cover current behavior).
 - Concrete provider implementations (OpenAI, Anthropic, etc.).
 - Parallel tool/batch execution.
 - Tool discovery.
