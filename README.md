@@ -62,8 +62,12 @@ agent-orchestrator/
 │   │   ├── __init__.py
 │   │   ├── base.py
 │   │   └── models.py
-│   └── state/
+│   ├── state/
+│   │   ├── __init__.py
+│   │   └── models.py
+│   └── tracing/
 │       ├── __init__.py
+│       ├── collector.py
 │       └── models.py
 ├── tests/
 │   ├── __init__.py
@@ -81,7 +85,11 @@ agent-orchestrator/
 │   ├── test_tool_integration.py
 │   ├── test_tool_models.py
 │   ├── test_tool_registry.py
-│   └── test_tool_validator.py
+│   ├── test_tool_validator.py
+│   ├── test_tracing.py
+│   ├── test_tracing_collector.py
+│   ├── test_tracing_hardening.py
+│   └── test_tracing_instrumentation.py
 ├── examples/
 │   └── .gitkeep
 ├── README.md
@@ -268,7 +276,6 @@ print(result.status, result.final_response)
 - Tool discovery.
 - State persistence, database integration, conversation, or agent memory.
 - Streaming support.
-- Tracing and observability integrations.
 
 ## Installation
 

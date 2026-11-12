@@ -25,6 +25,15 @@ from agent_orchestrator.tools.executor import ExecutionContext, ToolExecutor
 from agent_orchestrator.tools.models import ToolCall, ToolDefinition, ToolResult
 from agent_orchestrator.tools.registry import RegisteredTool, ToolRegistry
 from agent_orchestrator.tools.validator import ToolValidator
+from agent_orchestrator.tracing import (
+    ExecutionEvent,
+    InMemoryTracer,
+    NoOpTracer,
+    Span,
+    SpanStatus,
+    Trace,
+    Tracer,
+)
 
 __all__ = [
     "OrchestratorConfig",
@@ -46,6 +55,13 @@ __all__ = [
     "ToolValidator",
     "ToolExecutor",
     "ExecutionContext",
+    "ExecutionEvent",
+    "Span",
+    "SpanStatus",
+    "Trace",
+    "Tracer",
+    "NoOpTracer",
+    "InMemoryTracer",
     "OrchestratorError",
     "ConfigurationError",
     "ToolError",
