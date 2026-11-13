@@ -13,15 +13,16 @@ import inspect
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from agent_orchestrator.config import OrchestratorConfig
 from agent_orchestrator.exceptions import ExecutionLimitError, ToolNotFoundError, ToolValidationError
+from agent_orchestrator.hooks import HookEventType, HookManager, LifecycleEvent, LifecycleHook
 from agent_orchestrator.retry import RetryPolicy
 from agent_orchestrator.tools.models import ToolCall, ToolResult
 from agent_orchestrator.tools.registry import RegisteredTool, ToolRegistry
 from agent_orchestrator.tools.validator import ToolValidator
-from agent_orchestrator.tracing import InMemoryTracer, NoOpTracer, SpanStatus, Tracer, ExecutionEvent
+from agent_orchestrator.tracing import ExecutionEvent, InMemoryTracer, NoOpTracer, SpanStatus, Tracer
 
 
 @dataclass
@@ -58,6 +59,7 @@ class ToolExecutor:
         validator: ToolValidator | None = None,
         config: OrchestratorConfig | None = None,
         tracer: Tracer | None = None,
+        hooks: Sequence[LifecycleHook] | None = None,
     ) -> None:
         self._registry = registry
         self._validator = validator or ToolValidator()
@@ -65,6 +67,11 @@ class ToolExecutor:
         self.tracer: Tracer = tracer or (
             InMemoryTracer() if self._config.enable_tracing else NoOpTracer()
         )
+        self._hook_manager = HookManager(hooks)
+
+    @property
+    def hooks(self) -> tuple[LifecycleHook, ...]:
+        return self._hook_manager.hooks
 
     def new_context(self) -> ExecutionContext:
         """Start a fresh execution session with an independent counter."""
@@ -189,6 +196,58 @@ class ToolExecutor:
             extra,
         )
 
+    def _emit_hook(
+        self,
+        event_type: HookEventType,
+        *,
+        execution_id: str | None,
+        iteration: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        # Best-effort dispatch; hook manager swallows ordinary exceptions.
+        # Execution process-control exceptions must not be suppressed by callers.
+        try:
+            self._hook_manager.emit(
+                LifecycleEvent(
+                    event_type=event_type,
+                    execution_id=execution_id,
+                    iteration=iteration,
+                    component="tool_executor",
+                    metadata=dict(metadata or {}),
+                    error=error,
+                    error_message=error_message,
+                )
+            )
+        except BaseException:
+            # Never swallow process-control/cancellation from hook dispatch in a
+            # way that would mask execution flow is handled by call sites; keep
+            # emission best-effort for unexpected BaseExceptions from hooks too.
+            return
+
+    async def _aemit_hook(
+        self,
+        event_type: HookEventType,
+        *,
+        execution_id: str | None,
+        iteration: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        await self._hook_manager.aemit(
+            LifecycleEvent(
+                event_type=event_type,
+                execution_id=execution_id,
+                iteration=iteration,
+                component="tool_executor",
+                metadata=dict(metadata or {}),
+                error=error,
+                error_message=error_message,
+            )
+        )
+
     def _traced_execute(
         self,
         tool_call: ToolCall,
@@ -213,6 +272,12 @@ class ToolExecutor:
             iteration,
             {"success": None},
         )
+        self._emit_hook(
+            HookEventType.TOOL_EXECUTION_STARTED,
+            execution_id=execution_id,
+            iteration=iteration,
+            metadata={"tool_name": tool_call.name, "tool_call_id": tool_call.id},
+        )
         status = SpanStatus.OK
         result: ToolResult | None = None
         try:
@@ -231,6 +296,19 @@ class ToolExecutor:
                     {"success": False, "error_type": type(exc).__name__},
                 )
                 result = self._failure(tool_call, exc)
+                self._emit_hook(
+                    HookEventType.TOOL_EXECUTION_FAILED,
+                    execution_id=execution_id,
+                    iteration=iteration,
+                    metadata={
+                        "tool_name": tool_call.name,
+                        "tool_call_id": tool_call.id,
+                        "success": False,
+                        "error_type": type(exc).__name__,
+                    },
+                    error=exc,
+                    error_message=result.error,
+                )
             else:
                 attempt = 1
                 while True:
@@ -276,6 +354,21 @@ class ToolExecutor:
                                 delay=delay,
                                 retry_number=attempt,
                             )
+                            self._emit_hook(
+                                HookEventType.TOOL_RETRY_SCHEDULED,
+                                execution_id=execution_id,
+                                iteration=iteration,
+                                metadata={
+                                    "tool_name": tool_call.name,
+                                    "tool_call_id": tool_call.id,
+                                    "attempt": attempt,
+                                    "max_attempts": policy.max_attempts,
+                                    "retry_number": attempt,
+                                    "delay": delay,
+                                    "error_type": type(exc).__name__,
+                                },
+                                error=exc,
+                            )
                             if delay > 0:
                                 time.sleep(delay)
                             attempt += 1
@@ -292,6 +385,19 @@ class ToolExecutor:
                                 {"success": False, "error_type": type(exc).__name__},
                             )
                             result = self._failure(tool_call, exc)
+                            self._emit_hook(
+                                HookEventType.TOOL_EXECUTION_FAILED,
+                                execution_id=execution_id,
+                                iteration=iteration,
+                                metadata={
+                                    "tool_name": tool_call.name,
+                                    "tool_call_id": tool_call.id,
+                                    "success": False,
+                                    "error_type": type(exc).__name__,
+                                },
+                                error=exc,
+                                error_message=result.error,
+                            )
                             break
                         status = SpanStatus.ERROR
                         raise
@@ -316,6 +422,16 @@ class ToolExecutor:
                             {"success": True},
                         )
                         result = self._success(tool_call, output)
+                        self._emit_hook(
+                            HookEventType.TOOL_EXECUTION_COMPLETED,
+                            execution_id=execution_id,
+                            iteration=iteration,
+                            metadata={
+                                "tool_name": tool_call.name,
+                                "tool_call_id": tool_call.id,
+                                "success": True,
+                            },
+                        )
                         break
         except BaseException:
             status = SpanStatus.ERROR
@@ -349,6 +465,12 @@ class ToolExecutor:
             iteration,
             {"success": None},
         )
+        await self._aemit_hook(
+            HookEventType.TOOL_EXECUTION_STARTED,
+            execution_id=execution_id,
+            iteration=iteration,
+            metadata={"tool_name": tool_call.name, "tool_call_id": tool_call.id},
+        )
         status = SpanStatus.OK
         result: ToolResult | None = None
         try:
@@ -367,6 +489,23 @@ class ToolExecutor:
                     {"success": False, "error_type": type(exc).__name__},
                 )
                 result = self._failure(tool_call, exc)
+                try:
+                    await self._aemit_hook(
+                        HookEventType.TOOL_EXECUTION_FAILED,
+                        execution_id=execution_id,
+                        iteration=iteration,
+                        metadata={
+                            "tool_name": tool_call.name,
+                            "tool_call_id": tool_call.id,
+                            "success": False,
+                            "error_type": type(exc).__name__,
+                        },
+                        error=exc,
+                        error_message=result.error,
+                    )
+                except asyncio.CancelledError:
+                    status = SpanStatus.ERROR
+                    raise
             else:
                 attempt = 1
                 while True:
@@ -414,6 +553,21 @@ class ToolExecutor:
                                 delay=delay,
                                 retry_number=attempt,
                             )
+                            await self._aemit_hook(
+                                HookEventType.TOOL_RETRY_SCHEDULED,
+                                execution_id=execution_id,
+                                iteration=iteration,
+                                metadata={
+                                    "tool_name": tool_call.name,
+                                    "tool_call_id": tool_call.id,
+                                    "attempt": attempt,
+                                    "max_attempts": policy.max_attempts,
+                                    "retry_number": attempt,
+                                    "delay": delay,
+                                    "error_type": type(exc).__name__,
+                                },
+                                error=exc,
+                            )
                             if delay > 0:
                                 await asyncio.sleep(delay)
                             attempt += 1
@@ -430,6 +584,23 @@ class ToolExecutor:
                                 {"success": False, "error_type": type(exc).__name__},
                             )
                             result = self._failure(tool_call, exc)
+                            try:
+                                await self._aemit_hook(
+                                    HookEventType.TOOL_EXECUTION_FAILED,
+                                    execution_id=execution_id,
+                                    iteration=iteration,
+                                    metadata={
+                                        "tool_name": tool_call.name,
+                                        "tool_call_id": tool_call.id,
+                                        "success": False,
+                                        "error_type": type(exc).__name__,
+                                    },
+                                    error=exc,
+                                    error_message=result.error,
+                                )
+                            except asyncio.CancelledError:
+                                status = SpanStatus.ERROR
+                                raise
                             break
                         status = SpanStatus.ERROR
                         raise
@@ -454,6 +625,16 @@ class ToolExecutor:
                             {"success": True},
                         )
                         result = self._success(tool_call, output)
+                        await self._aemit_hook(
+                            HookEventType.TOOL_EXECUTION_COMPLETED,
+                            execution_id=execution_id,
+                            iteration=iteration,
+                            metadata={
+                                "tool_name": tool_call.name,
+                                "tool_call_id": tool_call.id,
+                                "success": True,
+                            },
+                        )
                         break
         except BaseException:
             status = SpanStatus.ERROR
