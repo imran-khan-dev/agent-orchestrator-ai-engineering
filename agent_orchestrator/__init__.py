@@ -17,6 +17,7 @@ from agent_orchestrator.exceptions import (
     ToolNotFoundError,
     ToolValidationError,
 )
+from agent_orchestrator.hooks import HookEventType, HookManager, LifecycleEvent, LifecycleHook
 from agent_orchestrator.providers.base import LLMProvider
 from agent_orchestrator.providers.models import ProviderRequest, ProviderResponse
 from agent_orchestrator.retry import RetryPolicy
@@ -55,6 +56,10 @@ __all__ = [
     "ToolValidator",
     "ToolExecutor",
     "ExecutionContext",
+    "HookEventType",
+    "LifecycleEvent",
+    "LifecycleHook",
+    "HookManager",
     "ExecutionEvent",
     "Span",
     "SpanStatus",

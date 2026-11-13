@@ -14,12 +14,13 @@ import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Sequence
 
 from pydantic import ValidationError
 
 from agent_orchestrator.config import OrchestratorConfig
 from agent_orchestrator.core.models import ExecutionResult, ExecutionStatus
+from agent_orchestrator.hooks import HookEventType, HookManager, LifecycleEvent, LifecycleHook
 from agent_orchestrator.providers.base import LLMProvider
 from agent_orchestrator.providers.models import ProviderRequest, ProviderResponse
 from agent_orchestrator.retry import RetryPolicy
@@ -71,6 +72,7 @@ class AgentLoop:
         config: OrchestratorConfig | None = None,
         tool_executor: ToolExecutor | None = None,
         tracer: Tracer | None = None,
+        hooks: Sequence[LifecycleHook] | None = None,
     ) -> None:
         self._config = config or OrchestratorConfig()
         self._tool_executor = tool_executor
@@ -80,9 +82,11 @@ class AgentLoop:
             self._tracer = InMemoryTracer()
         else:
             self._tracer = NoOpTracer()
-        # Share tracer with executor to avoid conflicting instances.
+        self._hook_manager = HookManager(hooks)
+        # Share tracer and hooks with executor to avoid conflicting instances.
         if self._tool_executor is not None:
             self._tool_executor.tracer = self._tracer
+            self._tool_executor._hook_manager = self._hook_manager
 
     @property
     def config(self) -> OrchestratorConfig:
@@ -97,6 +101,94 @@ class AgentLoop:
         self._tracer = tracer
         if self._tool_executor is not None:
             self._tool_executor.tracer = tracer
+
+    @property
+    def hooks(self) -> tuple[LifecycleHook, ...]:
+        return self._hook_manager.hooks
+
+    def _emit_hook(
+        self,
+        event_type: HookEventType,
+        *,
+        execution_id: str | None = None,
+        iteration: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        try:
+            self._hook_manager.emit(
+                LifecycleEvent(
+                    event_type=event_type,
+                    execution_id=execution_id,
+                    iteration=iteration,
+                    component="agent_loop",
+                    metadata=dict(metadata or {}),
+                    error=error,
+                    error_message=error_message,
+                )
+            )
+        except BaseException:
+            # Best-effort for sync path; callers preserve original execution exceptions.
+            return
+
+    async def _aemit_hook(
+        self,
+        event_type: HookEventType,
+        *,
+        execution_id: str | None = None,
+        iteration: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        await self._hook_manager.aemit(
+            LifecycleEvent(
+                event_type=event_type,
+                execution_id=execution_id,
+                iteration=iteration,
+                component="agent_loop",
+                metadata=dict(metadata or {}),
+                error=error,
+                error_message=error_message,
+            )
+        )
+
+    def _emit_terminal_agent_hook(self, execution_id: str, result: ExecutionResult) -> None:
+        meta = {
+            "status": result.status.value,
+            "iterations": result.iterations,
+            "tool_calls_count": result.tool_calls_count,
+        }
+        if result.status == ExecutionStatus.COMPLETED:
+            self._emit_hook(
+                HookEventType.AGENT_COMPLETED, execution_id=execution_id, metadata=meta
+            )
+        else:
+            self._emit_hook(
+                HookEventType.AGENT_FAILED,
+                execution_id=execution_id,
+                metadata=meta,
+                error_message=result.error,
+            )
+
+    async def _aemit_terminal_agent_hook(self, execution_id: str, result: ExecutionResult) -> None:
+        meta = {
+            "status": result.status.value,
+            "iterations": result.iterations,
+            "tool_calls_count": result.tool_calls_count,
+        }
+        if result.status == ExecutionStatus.COMPLETED:
+            await self._aemit_hook(
+                HookEventType.AGENT_COMPLETED, execution_id=execution_id, metadata=meta
+            )
+        else:
+            await self._aemit_hook(
+                HookEventType.AGENT_FAILED,
+                execution_id=execution_id,
+                metadata=meta,
+                error_message=result.error,
+            )
 
     def run(
         self,
@@ -134,6 +226,11 @@ class AgentLoop:
         self._record_event(
             "agent.execution.started", trace_id, root_span, "agent_loop", {"execution_id": trace_id}
         )
+        self._emit_hook(
+            HookEventType.AGENT_STARTED,
+            execution_id=trace_id,
+            metadata={"execution_id": trace_id},
+        )
 
         try:
             if step is not None:
@@ -148,6 +245,7 @@ class AgentLoop:
                 )
             self._emit_completion_events(trace_id, root_span, result[1])
             self._end_span(root_span, trace_id, self._status_for_result(result[1]))
+            self._emit_terminal_agent_hook(trace_id, result[1])
             return result
         except Exception as exc:
             res = self._finish(
@@ -160,6 +258,13 @@ class AgentLoop:
                 "agent.execution.failed", trace_id, root_span, "agent_loop", {"execution_id": trace_id}
             )
             self._end_span(root_span, trace_id, SpanStatus.ERROR)
+            self._emit_hook(
+                HookEventType.AGENT_FAILED,
+                execution_id=trace_id,
+                metadata={"status": res[1].status.value, "iterations": res[1].iterations},
+                error=exc,
+                error_message=res[1].error,
+            )
             return res
 
     async def run_async(
@@ -189,6 +294,11 @@ class AgentLoop:
         self._record_event(
             "agent.execution.started", trace_id, root_span, "agent_loop", {"execution_id": trace_id}
         )
+        await self._aemit_hook(
+            HookEventType.AGENT_STARTED,
+            execution_id=trace_id,
+            metadata={"execution_id": trace_id},
+        )
 
         try:
             if step is not None:
@@ -205,7 +315,34 @@ class AgentLoop:
                 )
             self._emit_completion_events(trace_id, root_span, result[1])
             self._end_span(root_span, trace_id, self._status_for_result(result[1]))
+            await self._aemit_terminal_agent_hook(trace_id, result[1])
             return result
+        except asyncio.CancelledError as exc:
+            try:
+                self._record_event(
+                    "agent.execution.failed", trace_id, root_span, "agent_loop", {"execution_id": trace_id}
+                )
+            except Exception:
+                pass
+            try:
+                self._end_span(root_span, trace_id, SpanStatus.ERROR)
+            except Exception:
+                pass
+            try:
+                await self._aemit_hook(
+                    HookEventType.AGENT_CANCELLED,
+                    execution_id=trace_id,
+                    metadata={"execution_id": trace_id},
+                    error=exc,
+                    error_message=f"{type(exc).__name__}",
+                )
+            except asyncio.CancelledError:
+                # A new genuine task cancellation during cleanup hook dispatch
+                # must not replace the original execution cancellation.
+                pass
+            except Exception:
+                pass
+            raise
         except Exception as exc:
             res = self._finish(
                 state,
@@ -217,6 +354,13 @@ class AgentLoop:
                 "agent.execution.failed", trace_id, root_span, "agent_loop", {"execution_id": trace_id}
             )
             self._end_span(root_span, trace_id, SpanStatus.ERROR)
+            await self._aemit_hook(
+                HookEventType.AGENT_FAILED,
+                execution_id=trace_id,
+                metadata={"status": res[1].status.value, "iterations": res[1].iterations},
+                error=exc,
+                error_message=res[1].error,
+            )
             return res
 
     def _run_with_step(
@@ -246,16 +390,52 @@ class AgentLoop:
                 "agent_loop",
                 {"execution_id": trace_id, "iteration": state.iteration_count},
             )
+            self._emit_hook(
+                HookEventType.ITERATION_STARTED,
+                execution_id=trace_id,
+                iteration=state.iteration_count,
+                metadata={"iteration": state.iteration_count},
+            )
             try:
                 outcome = step_fn(state)
                 terminal = self._apply_outcome(state, tool_context, outcome)
-            except Exception:
+            except Exception as exc:
                 self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                self._emit_hook(
+                    HookEventType.ITERATION_FAILED,
+                    execution_id=trace_id,
+                    iteration=state.iteration_count,
+                    metadata={"iteration": state.iteration_count},
+                    error=exc,
+                    error_message=f"{type(exc).__name__}: {exc}",
+                )
                 raise
             if terminal is not None:
-                self._end_span(iter_span, trace_id, self._status_for_result(terminal[1]))
+                if terminal[1].status == ExecutionStatus.FAILED:
+                    self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                    self._emit_hook(
+                        HookEventType.ITERATION_FAILED,
+                        execution_id=trace_id,
+                        iteration=state.iteration_count,
+                        metadata={"iteration": state.iteration_count, "status": terminal[1].status.value},
+                        error_message=terminal[1].error,
+                    )
+                else:
+                    self._end_span(iter_span, trace_id, self._status_for_result(terminal[1]))
+                    self._emit_hook(
+                        HookEventType.ITERATION_COMPLETED,
+                        execution_id=trace_id,
+                        iteration=state.iteration_count,
+                        metadata={"iteration": state.iteration_count, "status": terminal[1].status.value},
+                    )
                 return terminal
             self._end_span(iter_span, trace_id, SpanStatus.OK)
+            self._emit_hook(
+                HookEventType.ITERATION_COMPLETED,
+                execution_id=trace_id,
+                iteration=state.iteration_count,
+                metadata={"iteration": state.iteration_count},
+            )
 
     async def _run_with_step_async(
         self,
@@ -284,18 +464,71 @@ class AgentLoop:
                 "agent_loop",
                 {"execution_id": trace_id, "iteration": state.iteration_count},
             )
+            await self._aemit_hook(
+                HookEventType.ITERATION_STARTED,
+                execution_id=trace_id,
+                iteration=state.iteration_count,
+                metadata={"iteration": state.iteration_count},
+            )
             try:
                 outcome = step_fn(state)
                 if inspect.isawaitable(outcome):
                     outcome = await outcome
                 terminal = self._apply_outcome(state, tool_context, outcome)
-            except Exception:
+            except asyncio.CancelledError as exc:
                 self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                try:
+                    await self._aemit_hook(
+                        HookEventType.ITERATION_FAILED,
+                        execution_id=trace_id,
+                        iteration=state.iteration_count,
+                        metadata={"iteration": state.iteration_count, "cancelled": True},
+                        error=exc,
+                        error_message=f"{type(exc).__name__}",
+                    )
+                except asyncio.CancelledError:
+                    # Preserve original execution cancellation during cleanup.
+                    pass
+                except Exception:
+                    pass
+                raise
+            except Exception as exc:
+                self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                await self._aemit_hook(
+                    HookEventType.ITERATION_FAILED,
+                    execution_id=trace_id,
+                    iteration=state.iteration_count,
+                    metadata={"iteration": state.iteration_count},
+                    error=exc,
+                    error_message=f"{type(exc).__name__}: {exc}",
+                )
                 raise
             if terminal is not None:
-                self._end_span(iter_span, trace_id, self._status_for_result(terminal[1]))
+                if terminal[1].status == ExecutionStatus.FAILED:
+                    self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                    await self._aemit_hook(
+                        HookEventType.ITERATION_FAILED,
+                        execution_id=trace_id,
+                        iteration=state.iteration_count,
+                        metadata={"iteration": state.iteration_count, "status": terminal[1].status.value},
+                        error_message=terminal[1].error,
+                    )
+                else:
+                    self._end_span(iter_span, trace_id, self._status_for_result(terminal[1]))
+                    await self._aemit_hook(
+                        HookEventType.ITERATION_COMPLETED,
+                        execution_id=trace_id,
+                        iteration=state.iteration_count,
+                        metadata={"iteration": state.iteration_count, "status": terminal[1].status.value},
+                    )
                 return terminal
             self._end_span(iter_span, trace_id, SpanStatus.OK)
+            await self._aemit_hook(
+                HookEventType.ITERATION_COMPLETED,
+                execution_id=trace_id,
+                iteration=state.iteration_count,
+                metadata={"iteration": state.iteration_count},
+            )
 
     def _run_with_provider_sync(
         self,
@@ -329,6 +562,12 @@ class AgentLoop:
                 "agent_loop",
                 {"execution_id": trace_id, "iteration": state.iteration_count},
             )
+            self._emit_hook(
+                HookEventType.ITERATION_STARTED,
+                execution_id=trace_id,
+                iteration=state.iteration_count,
+                metadata={"iteration": state.iteration_count},
+            )
             try:
                 request = ProviderRequest(messages=list(state.messages), tools=available_tools)
                 response = self._provider_call_with_retry_sync(
@@ -338,13 +577,43 @@ class AgentLoop:
                     state, tool_context, response, trace_id, iter_span, state.iteration_count,
                     tool_retry_policy=tool_retry_policy,
                 )
-            except Exception:
+            except Exception as exc:
                 self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                self._emit_hook(
+                    HookEventType.ITERATION_FAILED,
+                    execution_id=trace_id,
+                    iteration=state.iteration_count,
+                    metadata={"iteration": state.iteration_count},
+                    error=exc,
+                    error_message=f"{type(exc).__name__}: {exc}",
+                )
                 raise
             if terminal is not None:
-                self._end_span(iter_span, trace_id, self._status_for_result(terminal[1]))
+                if terminal[1].status == ExecutionStatus.FAILED:
+                    self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                    self._emit_hook(
+                        HookEventType.ITERATION_FAILED,
+                        execution_id=trace_id,
+                        iteration=state.iteration_count,
+                        metadata={"iteration": state.iteration_count, "status": terminal[1].status.value},
+                        error_message=terminal[1].error,
+                    )
+                else:
+                    self._end_span(iter_span, trace_id, self._status_for_result(terminal[1]))
+                    self._emit_hook(
+                        HookEventType.ITERATION_COMPLETED,
+                        execution_id=trace_id,
+                        iteration=state.iteration_count,
+                        metadata={"iteration": state.iteration_count, "status": terminal[1].status.value},
+                    )
                 return terminal
             self._end_span(iter_span, trace_id, SpanStatus.OK)
+            self._emit_hook(
+                HookEventType.ITERATION_COMPLETED,
+                execution_id=trace_id,
+                iteration=state.iteration_count,
+                metadata={"iteration": state.iteration_count},
+            )
 
     async def _run_with_provider_async(
         self,
@@ -378,6 +647,12 @@ class AgentLoop:
                 "agent_loop",
                 {"execution_id": trace_id, "iteration": state.iteration_count},
             )
+            await self._aemit_hook(
+                HookEventType.ITERATION_STARTED,
+                execution_id=trace_id,
+                iteration=state.iteration_count,
+                metadata={"iteration": state.iteration_count},
+            )
             try:
                 request = ProviderRequest(messages=list(state.messages), tools=available_tools)
                 response = await self._provider_call_with_retry_async(
@@ -387,13 +662,60 @@ class AgentLoop:
                     state, tool_context, response, trace_id, iter_span, state.iteration_count,
                     tool_retry_policy=tool_retry_policy,
                 )
-            except Exception:
+            except asyncio.CancelledError as exc:
                 self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                try:
+                    await self._aemit_hook(
+                        HookEventType.ITERATION_FAILED,
+                        execution_id=trace_id,
+                        iteration=state.iteration_count,
+                        metadata={"iteration": state.iteration_count, "cancelled": True},
+                        error=exc,
+                        error_message=f"{type(exc).__name__}",
+                    )
+                except asyncio.CancelledError:
+                    # Preserve original execution cancellation during cleanup.
+                    pass
+                except Exception:
+                    pass
+                raise
+            except Exception as exc:
+                self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                await self._aemit_hook(
+                    HookEventType.ITERATION_FAILED,
+                    execution_id=trace_id,
+                    iteration=state.iteration_count,
+                    metadata={"iteration": state.iteration_count},
+                    error=exc,
+                    error_message=f"{type(exc).__name__}: {exc}",
+                )
                 raise
             if terminal is not None:
-                self._end_span(iter_span, trace_id, self._status_for_result(terminal[1]))
+                if terminal[1].status == ExecutionStatus.FAILED:
+                    self._end_span(iter_span, trace_id, SpanStatus.ERROR)
+                    await self._aemit_hook(
+                        HookEventType.ITERATION_FAILED,
+                        execution_id=trace_id,
+                        iteration=state.iteration_count,
+                        metadata={"iteration": state.iteration_count, "status": terminal[1].status.value},
+                        error_message=terminal[1].error,
+                    )
+                else:
+                    self._end_span(iter_span, trace_id, self._status_for_result(terminal[1]))
+                    await self._aemit_hook(
+                        HookEventType.ITERATION_COMPLETED,
+                        execution_id=trace_id,
+                        iteration=state.iteration_count,
+                        metadata={"iteration": state.iteration_count, "status": terminal[1].status.value},
+                    )
                 return terminal
             self._end_span(iter_span, trace_id, SpanStatus.OK)
+            await self._aemit_hook(
+                HookEventType.ITERATION_COMPLETED,
+                execution_id=trace_id,
+                iteration=state.iteration_count,
+                metadata={"iteration": state.iteration_count},
+            )
 
     def _provider_call_with_retry_sync(
         self,
@@ -418,7 +740,14 @@ class AgentLoop:
             "provider",
             {"execution_id": trace_id, "iteration": iteration},
         )
+        self._emit_hook(
+            HookEventType.PROVIDER_REQUEST_STARTED,
+            execution_id=trace_id,
+            iteration=iteration,
+            metadata={"iteration": iteration},
+        )
         attempt = 1
+        span_ended = False
         try:
             while True:
                 try:
@@ -450,6 +779,17 @@ class AgentLoop:
                         },
                     )
                     self._end_span(span_id, trace_id, SpanStatus.OK)
+                    span_ended = True
+                    self._emit_hook(
+                        HookEventType.PROVIDER_RESPONSE_RECEIVED,
+                        execution_id=trace_id,
+                        iteration=iteration,
+                        metadata={
+                            "iteration": iteration,
+                            "has_tool_calls": bool(getattr(response, "tool_calls", None)),
+                            "has_content": getattr(response, "content", None) is not None,
+                        },
+                    )
                     return response
                 except Exception as exc:
                     self._record_retry_event(
@@ -468,7 +808,14 @@ class AgentLoop:
                             "provider",
                             {"execution_id": trace_id, "iteration": iteration},
                         )
-                        self._end_span(span_id, trace_id, SpanStatus.ERROR)
+                        self._emit_hook(
+                            HookEventType.PROVIDER_REQUEST_FAILED,
+                            execution_id=trace_id,
+                            iteration=iteration,
+                            metadata={"iteration": iteration},
+                            error=exc,
+                            error_message=f"{type(exc).__name__}: {exc}",
+                        )
                         raise
                     if policy.should_retry(attempt, exc):
                         delay = float(policy.next_delay(attempt))
@@ -482,6 +829,20 @@ class AgentLoop:
                             trace_id=trace_id,
                             span_id=span_id,
                         )
+                        self._emit_hook(
+                            HookEventType.PROVIDER_RETRY_SCHEDULED,
+                            execution_id=trace_id,
+                            iteration=iteration,
+                            metadata={
+                                "iteration": iteration,
+                                "attempt": attempt,
+                                "max_attempts": policy.max_attempts,
+                                "retry_number": attempt,
+                                "delay": delay,
+                                "error_type": type(exc).__name__,
+                            },
+                            error=exc,
+                        )
                         if delay > 0:
                             time.sleep(delay)
                         attempt += 1
@@ -493,13 +854,21 @@ class AgentLoop:
                         "provider",
                         {"execution_id": trace_id, "iteration": iteration},
                     )
-                    self._end_span(span_id, trace_id, SpanStatus.ERROR)
+                    self._emit_hook(
+                        HookEventType.PROVIDER_REQUEST_FAILED,
+                        execution_id=trace_id,
+                        iteration=iteration,
+                        metadata={"iteration": iteration},
+                        error=exc,
+                        error_message=f"{type(exc).__name__}: {exc}",
+                    )
                     raise
-        except Exception:
-            try:
-                self._end_span(span_id, trace_id, SpanStatus.ERROR)
-            except Exception:
-                pass
+        except BaseException:
+            if not span_ended:
+                try:
+                    self._end_span(span_id, trace_id, SpanStatus.ERROR)
+                except Exception:
+                    pass
             raise
 
     async def _provider_call_with_retry_async(
@@ -526,7 +895,14 @@ class AgentLoop:
             {"execution_id": trace_id, "iteration": iteration},
         )
         attempt = 1
+        span_ended = False
         try:
+            await self._aemit_hook(
+                HookEventType.PROVIDER_REQUEST_STARTED,
+                execution_id=trace_id,
+                iteration=iteration,
+                metadata={"iteration": iteration},
+            )
             while True:
                 try:
                     self._record_retry_event(
@@ -557,7 +933,49 @@ class AgentLoop:
                         },
                     )
                     self._end_span(span_id, trace_id, SpanStatus.OK)
+                    span_ended = True
+                    await self._aemit_hook(
+                        HookEventType.PROVIDER_RESPONSE_RECEIVED,
+                        execution_id=trace_id,
+                        iteration=iteration,
+                        metadata={
+                            "iteration": iteration,
+                            "has_tool_calls": bool(getattr(response, "tool_calls", None)),
+                            "has_content": getattr(response, "content", None) is not None,
+                        },
+                    )
                     return response
+                except asyncio.CancelledError as exc:
+                    self._record_retry_event(
+                        "provider.attempt.failed",
+                        attempt,
+                        policy.max_attempts,
+                        error=exc,
+                        trace_id=trace_id,
+                        span_id=span_id,
+                    )
+                    self._record_event(
+                        "provider.request.failed",
+                        trace_id,
+                        span_id,
+                        "provider",
+                        {"execution_id": trace_id, "iteration": iteration},
+                    )
+                    try:
+                        await self._aemit_hook(
+                            HookEventType.PROVIDER_REQUEST_FAILED,
+                            execution_id=trace_id,
+                            iteration=iteration,
+                            metadata={"iteration": iteration, "cancelled": True},
+                            error=exc,
+                            error_message=f"{type(exc).__name__}",
+                        )
+                    except asyncio.CancelledError:
+                        # Preserve original cancellation raised from provider flow.
+                        pass
+                    except Exception:
+                        pass
+                    raise
                 except Exception as exc:
                     self._record_retry_event(
                         "provider.attempt.failed",
@@ -575,7 +993,20 @@ class AgentLoop:
                             "provider",
                             {"execution_id": trace_id, "iteration": iteration},
                         )
-                        self._end_span(span_id, trace_id, SpanStatus.ERROR)
+                        try:
+                            await self._aemit_hook(
+                                HookEventType.PROVIDER_REQUEST_FAILED,
+                                execution_id=trace_id,
+                                iteration=iteration,
+                                metadata={"iteration": iteration},
+                                error=exc,
+                                error_message=f"{type(exc).__name__}: {exc}",
+                            )
+                        except asyncio.CancelledError:
+                            # Preserve original process-control exception from provider flow.
+                            pass
+                        except Exception:
+                            pass
                         raise
                     if policy.should_retry(attempt, exc):
                         delay = float(policy.next_delay(attempt))
@@ -589,6 +1020,20 @@ class AgentLoop:
                             trace_id=trace_id,
                             span_id=span_id,
                         )
+                        await self._aemit_hook(
+                            HookEventType.PROVIDER_RETRY_SCHEDULED,
+                            execution_id=trace_id,
+                            iteration=iteration,
+                            metadata={
+                                "iteration": iteration,
+                                "attempt": attempt,
+                                "max_attempts": policy.max_attempts,
+                                "retry_number": attempt,
+                                "delay": delay,
+                                "error_type": type(exc).__name__,
+                            },
+                            error=exc,
+                        )
                         if delay > 0:
                             await asyncio.sleep(delay)
                         attempt += 1
@@ -600,13 +1045,21 @@ class AgentLoop:
                         "provider",
                         {"execution_id": trace_id, "iteration": iteration},
                     )
-                    self._end_span(span_id, trace_id, SpanStatus.ERROR)
+                    await self._aemit_hook(
+                        HookEventType.PROVIDER_REQUEST_FAILED,
+                        execution_id=trace_id,
+                        iteration=iteration,
+                        metadata={"iteration": iteration},
+                        error=exc,
+                        error_message=f"{type(exc).__name__}: {exc}",
+                    )
                     raise
-        except Exception:
-            try:
-                self._end_span(span_id, trace_id, SpanStatus.ERROR)
-            except Exception:
-                pass
+        except BaseException:
+            if not span_ended:
+                try:
+                    self._end_span(span_id, trace_id, SpanStatus.ERROR)
+                except Exception:
+                    pass
             raise
 
     async def _complete_async(

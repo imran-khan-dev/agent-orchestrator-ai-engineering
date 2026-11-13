@@ -296,6 +296,102 @@ print(result.status, result.final_response)
   with safe metadata (attempt, max_attempts, retry_number, delay, error_type,
   tool/trace identifiers) when a tracer is present.
 
+## Current Scope (Milestone 6.4 — Async Cancellation and Cleanup, Complete)
+
+- `run_async()` propagates `asyncio.CancelledError` instead of converting it into
+  a normal failed `ExecutionResult`. Cancellation is treated as process-control
+  flow (not retried) during async provider execution, async tool execution, and
+  retry backoff delays (`asyncio.sleep`).
+- Best-effort cleanup/finalization on cancellation: open tracing spans
+  (agent/iteration/provider/tool) are ended with `ERROR` status and relevant
+  failure events are recorded when possible (including cancelled tool spans in
+  `ToolExecutor`); cleanup does not swallow cancellation. Synchronous execution
+  paths (`run`, sync `execute`) remain unchanged.
+- Async tool execution cancels the in-flight executor future on timeout/cancel
+  paths to avoid orphaned background work in the wrapper; sync handlers run in a
+  worker thread via `run_in_executor` (thread cannot be force-stopped, but the
+  awaiting task no longer blocks on it after timeout/cancel handling). Provider
+  request spans are finalized once per terminal path.
+
+## Current Scope (Milestone 6.5 — Lifecycle Hooks, Hardening & Documentation, Complete)
+
+Lifecycle hooks provide **user-defined callbacks** at execution boundaries for
+reactions/side effects (logging, metrics, custom bookkeeping). They are distinct
+from **tracing**: tracing records observability spans/events (`Tracer`,
+`ExecutionEvent`), while hooks dispatch `LifecycleEvent` callbacks to registered
+`LifecycleHook` implementations. Hooks do not replace or alter tracing.
+
+### Public API
+
+- `HookEventType` — lifecycle event enum.
+- `LifecycleEvent` — immutable event payload (`event_type`, `execution_id`,
+  `iteration`, `component`, `timestamp`, `metadata`, `error`, `error_message`).
+- `LifecycleHook` — protocol with `on_event(event)` (may be sync or async in
+  async execution).
+- `HookManager` — ordered best-effort dispatcher.
+- Registration: optional constructor-level `hooks=[...]` on `AgentLoop(...)` and
+  `ToolExecutor(...)`. `AgentLoop` wires its hook registrations to its
+  `ToolExecutor` so tool/provider/agent/iteration events share the same hooks.
+
+### Event types
+
+- Agent: `AGENT_STARTED`, `AGENT_COMPLETED`, `AGENT_FAILED`, `AGENT_CANCELLED`
+- Iteration: `ITERATION_STARTED`, `ITERATION_COMPLETED`, `ITERATION_FAILED`
+- Provider: `PROVIDER_REQUEST_STARTED`, `PROVIDER_RESPONSE_RECEIVED`,
+  `PROVIDER_REQUEST_FAILED`, `PROVIDER_RETRY_SCHEDULED`
+- Tool: `TOOL_EXECUTION_STARTED`, `TOOL_EXECUTION_COMPLETED`,
+  `TOOL_EXECUTION_FAILED`, `TOOL_RETRY_SCHEDULED`
+
+Attempt-level tracing events are not duplicated as lifecycle hooks.
+
+### Sync and async usage
+
+```python
+from agent_orchestrator import AgentLoop, HookEventType, LifecycleEvent, OrchestratorConfig
+
+class MyHook:
+    def on_event(self, event: LifecycleEvent) -> None:
+        print(event.event_type, event.execution_id, event.iteration, event.metadata)
+
+loop = AgentLoop(config=OrchestratorConfig(max_iterations=3), hooks=[MyHook()])
+state, result = loop.run(messages=[{"role": "user", "content": "hi"}])
+```
+
+Async execution (`run_async`, `execute_async`) supports both synchronous and
+`async def on_event` hooks. Synchronous execution (`run`, `execute`) supports
+synchronous hooks only and does **not** execute awaitable hook results (no event
+loop/workaround is used). Coroutine objects returned in sync execution are
+closed best-effort to avoid unawaited-coroutine warnings/leaks; custom
+non-coroutine awaitables cannot be generically closed/disposed and are not
+executed. Use async hooks with async execution paths.
+
+### Execution order and semantics
+
+- Hooks are dispatched in registration order.
+- Dispatch is best-effort by default: ordinary hook exceptions do not interrupt
+  execution, do not change retry decisions/counts, and do not alter execution
+  results/state. RAISE policy is not implemented in this milestone.
+- Terminal lifecycle events are emitted once per terminal transition at existing
+  execution boundaries (aligned with tracing finalization): agent terminal after
+  completion/failure/cancellation handling; iteration terminal on completion or
+  failure/cancel of that iteration; provider request terminal on response or
+  terminal failure (with retry scheduling emitted before retry delay); tool
+  execution terminal on completion or terminal failure (retries scheduled before
+  retry delay). Loop-side malformed/duplicate/rejected tool-call handling follows
+  existing executor/loop boundaries to avoid duplicate tool lifecycle events.
+- Cancellation: `run_async` propagates `asyncio.CancelledError` unchanged;
+  `AGENT_CANCELLED`/failure-related hooks are emitted best-effort during cleanup
+  and hook failures must not suppress the original execution cancellation or
+  process-control exceptions (`KeyboardInterrupt`, `SystemExit`).
+- Hooks run inline on the execution path and may block it (synchronous
+  callbacks). Keep hook work lightweight.
+
+### Limitations
+
+- No per-run hook overrides and no RAISE error policy (best-effort only).
+- Hooks observe lifecycle events but cannot mutate retry/execution decisions.
+- Sync execution does not await async hooks; use async hooks with async execution.
+
 ## Planned but NOT implemented
 
 - Per-run `AgentLoop` tool retry policy override API (executor/config defaults
