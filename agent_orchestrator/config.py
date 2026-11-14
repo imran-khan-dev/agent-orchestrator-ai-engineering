@@ -14,16 +14,20 @@ class OrchestratorConfig(BaseModel):
     Pydantic validation error.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid")  # what is this
 
     max_iterations: int = Field(default=10, gt=0, description="Maximum agent loop iterations.")
+    
     tool_timeout: float = Field(
         default=30.0, gt=0, description="Timeout in seconds for a single tool execution."
     )
+
     max_tool_calls: int = Field(default=20, gt=0, description="Maximum number of tool calls per run.")
+    
     enable_tracing: bool = Field(
         default=True, description="Whether tracing/observability hooks are enabled."
     )
+   
     retry_policy: RetryPolicy = Field(
         default_factory=RetryPolicy,
         description="Default retry policy (one attempt, no retries unless configured).",
