@@ -13,6 +13,8 @@ from typing import Any, Sequence
 from agent_orchestrator.config import OrchestratorConfig
 from agent_orchestrator.core.lifecycle_helpers import (
     AsyncIterationStep,
+    IterationDecision,
+    IterationOutcome,
     IterationStep,
     LifecycleHelpersMixin,
 )
@@ -119,13 +121,24 @@ class AgentLoop(
         Returns:
             The final agent state and execution result.
         """
+        # Create a new execution state using the supplied messages and execution ID.
         state = self._initial_state(execution_id, messages)
+
+        # Create a separate tool execution context for this agent execution.
         tool_context = self._new_tool_context()
+
+        # Mark the execution as RUNNING because the agent is about to start working.
         state.status = ExecutionStatus.RUNNING
+
+        # Use the execution ID as the trace ID to connect all tracing events and spans.
         trace_id = state.execution_id
+
+        # Start the root tracing span representing the entire agent execution.
         root_span = self._start_span(
             trace_id, "agent.execution", "agent_loop", None, {"execution_id": trace_id}
         )
+
+        # Record an event indicating that the agent execution has started.
         self._record_event(
             "agent.execution.started",
             trace_id,
@@ -133,6 +146,8 @@ class AgentLoop(
             "agent_loop",
             {"execution_id": trace_id},
         )
+
+        # Notify registered lifecycle hooks that a new agent execution has started.
         self._emit_hook(
             HookEventType.AGENT_STARTED,
             execution_id=trace_id,
@@ -140,11 +155,14 @@ class AgentLoop(
         )
 
         try:
+            # If the caller provides a custom step, use it as the execution strategy.
+            # This takes priority even if a provider is also supplied.
             if step is not None:
-                # why run with stp?
                 result = self._run_with_step(
                     state, tool_context, step, trace_id, root_span
                 )
+
+            # Otherwise, if a provider is supplied, use the LLM/tool execution flow.
             elif provider is not None:
                 result = self._run_with_provider_sync(
                     state,
@@ -156,23 +174,37 @@ class AgentLoop(
                     trace_id,
                     root_span,
                 )
+
+            # If neither a custom step nor a provider is supplied,
+            # use the default step, which immediately completes the execution.
             else:
                 result = self._run_with_step(
                     state, tool_context, self._default_step, trace_id, root_span
                 )
 
+            # Emit tracing events describing the final execution result.
             self._emit_completion_events(trace_id, root_span, result[1])
+
+            # Close the root span using the appropriate status (OK or ERROR).
             self._end_span(root_span, trace_id, self._status_for_result(result[1]))
+
+            # Notify lifecycle hooks that the entire agent execution has finished.
             self._emit_terminal_agent_hook(trace_id, result[1])
+
+            # Return the final agent state and execution result to the caller.
             return result
 
         except Exception as exc:
+            # An unexpected exception occurred.
+            # Convert it into a FAILED execution result.
             res = self._finish(
                 state,
                 ExecutionStatus.FAILED,
                 tool_context,
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+            # Record that the overall agent execution failed.
             self._record_event(
                 "agent.execution.failed",
                 trace_id,
@@ -180,7 +212,11 @@ class AgentLoop(
                 "agent_loop",
                 {"execution_id": trace_id},
             )
+
+            # Mark the root tracing span as failed.
             self._end_span(root_span, trace_id, SpanStatus.ERROR)
+
+            # Notify registered hooks about the failed execution.
             self._emit_hook(
                 HookEventType.AGENT_FAILED,
                 execution_id=trace_id,
@@ -188,6 +224,8 @@ class AgentLoop(
                 error=exc,
                 error_message=res[1].error,
             )
+
+            # Return the failed execution result instead of propagating the exception.
             return res
 
     async def run_async(
@@ -207,13 +245,24 @@ class AgentLoop(
         supplied, ``complete_async`` is used if available; otherwise ``complete``
         runs in a worker thread to avoid blocking the event loop.
         """
+        # Initialize a new execution state, just like the synchronous run().
         state = self._initial_state(execution_id, messages)
+
+        # Create an independent tool context for this execution.
         tool_context = self._new_tool_context()
+
+        # Mark this execution as RUNNING.
         state.status = ExecutionStatus.RUNNING
+
+        # Use the execution ID as the trace ID.
         trace_id = state.execution_id
+
+        # Start the root span for the entire asynchronous agent execution.
         root_span = self._start_span(
             trace_id, "agent.execution", "agent_loop", None, {"execution_id": trace_id}
         )
+
+        # Record that the agent execution has started.
         self._record_event(
             "agent.execution.started",
             trace_id,
@@ -221,6 +270,9 @@ class AgentLoop(
             "agent_loop",
             {"execution_id": trace_id},
         )
+
+        # Dispatch the start hook asynchronously.
+        # Await it because hook execution may itself involve asynchronous work.
         await self._aemit_hook(
             HookEventType.AGENT_STARTED,
             execution_id=trace_id,
@@ -228,10 +280,14 @@ class AgentLoop(
         )
 
         try:
+            # A caller-provided step takes priority over the provider.
+            # The async step runner supports synchronous or asynchronous step functions.
             if step is not None:
                 result = await self._run_with_step_async(
                     state, tool_context, step, trace_id, root_span
                 )
+
+            # If a provider is supplied, use the asynchronous provider execution flow.
             elif provider is not None:
                 result = await self._run_with_provider_async(
                     state,
@@ -243,18 +299,32 @@ class AgentLoop(
                     trace_id,
                     root_span,
                 )
+
+            # If no step or provider is supplied, execute the default completion step.
             else:
                 result = await self._run_with_step_async(
                     state, tool_context, self._default_step, trace_id, root_span
                 )
 
+            # Record tracing events for the final execution result.
             self._emit_completion_events(trace_id, root_span, result[1])
+
+            # Close the root span with the final execution status.
             self._end_span(root_span, trace_id, self._status_for_result(result[1]))
+
+            # Dispatch the terminal lifecycle hook asynchronously.
             await self._aemit_terminal_agent_hook(trace_id, result[1])
+
+            # Return the final state and result.
             return result
 
         except asyncio.CancelledError as exc:
+            # The caller cancelled this async execution.
+            # Cancellation is different from an ordinary failure:
+            # do not convert it into a FAILED result.
+
             try:
+                # Best-effort recording of the interrupted execution.
                 self._record_event(
                     "agent.execution.failed",
                     trace_id,
@@ -263,14 +333,18 @@ class AgentLoop(
                     {"execution_id": trace_id},
                 )
             except Exception:
+                # Tracing cleanup must not prevent cancellation from propagating.
                 pass
 
             try:
+                # Mark the root span as failed because execution did not finish.
                 self._end_span(root_span, trace_id, SpanStatus.ERROR)
             except Exception:
+                # Even if tracing cleanup fails, continue cancellation handling.
                 pass
 
             try:
+                # Notify lifecycle hooks that this execution was cancelled.
                 await self._aemit_hook(
                     HookEventType.AGENT_CANCELLED,
                     execution_id=trace_id,
@@ -283,17 +357,23 @@ class AgentLoop(
                 # must not replace the original execution cancellation.
                 pass
             except Exception:
+                # Hook cleanup errors must not hide the original cancellation.
                 pass
 
+            # Re-raise cancellation so the caller knows the task was cancelled.
             raise
 
         except Exception as exc:
+            # An ordinary execution error occurred.
+            # Convert it into a FAILED execution result.
             res = self._finish(
                 state,
                 ExecutionStatus.FAILED,
                 tool_context,
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+            # Record the overall execution failure.
             self._record_event(
                 "agent.execution.failed",
                 trace_id,
@@ -301,7 +381,11 @@ class AgentLoop(
                 "agent_loop",
                 {"execution_id": trace_id},
             )
+
+            # Close the root span with ERROR status.
             self._end_span(root_span, trace_id, SpanStatus.ERROR)
+
+            # Notify lifecycle hooks asynchronously about the failure.
             await self._aemit_hook(
                 HookEventType.AGENT_FAILED,
                 execution_id=trace_id,
@@ -309,4 +393,6 @@ class AgentLoop(
                 error=exc,
                 error_message=res[1].error,
             )
+
+            # Return the failed execution result.
             return res

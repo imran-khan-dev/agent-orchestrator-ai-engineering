@@ -148,8 +148,7 @@ class ResponseHandlerMixin:
             }
         )
 
-    @staticmethod
-    def _append_tool_result_message(state: AgentState, result: ToolResult) -> None:
+    def _append_tool_result_message(self, state: AgentState, result: ToolResult) -> None:
         state.messages.append(
             {
                 "role": "tool",
