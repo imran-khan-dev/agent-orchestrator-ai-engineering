@@ -141,6 +141,7 @@ class AgentLoop(
 
         try:
             if step is not None:
+                # why run with stp?
                 result = self._run_with_step(
                     state, tool_context, step, trace_id, root_span
                 )
