@@ -556,6 +556,10 @@ class ProviderRunnerMixin:
     async def _complete_async(
         self, provider: LLMProvider, request: ProviderRequest
     ) -> ProviderResponse:
+
+        # This code calls the provider using its async method if available; otherwise, 
+        # it runs the normal sync method in a background thread.
+       
         complete_async = getattr(provider, "complete_async", None)
         if callable(complete_async):
             result = complete_async(request)
@@ -575,17 +579,23 @@ class ProviderRunnerMixin:
 
     @staticmethod
     def _is_process_control_exception(exc: BaseException) -> bool:
+
+        # Don't retry when execution is explicitly cancelled or the application is shutting down.
+        # These signals mean we must stop, not treat the situation as a normal failure.
+
         if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
             return True
         name = type(exc).__name__
         return name in {"CancelledError", "TaskCancelledException"}
 
+
+    #  When agent retries, keep track of the retry attempts. Helpful for debugging.
     def _record_retry_event(
         self,
         event_type: str,
         attempt: int,
         max_attempts: int,
-        *,
+        *, # Means every parameter after * must be passed by its name.
         error: BaseException | None = None,
         delay: float | None = None,
         retry_number: int | None = None,
