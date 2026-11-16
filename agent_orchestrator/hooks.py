@@ -59,11 +59,7 @@ class LifecycleHook(Protocol):
     def on_event(self, event: LifecycleEvent) -> Any | Awaitable[Any]:
         """Handle a lifecycle event."""
         ...
-
-
-def _is_process_control(exc: BaseException) -> bool:
-    return isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit))
-
+    
 
 class HookManager:
     """Ordered lifecycle hook dispatcher.

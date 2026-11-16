@@ -14,7 +14,7 @@ class OrchestratorConfig(BaseModel):
     Pydantic validation error.
     """
 
-    model_config = ConfigDict(extra="forbid")  # what is this
+    model_config = ConfigDict(extra="forbid")
 
     max_iterations: int = Field(default=10, gt=0, description="Maximum agent loop iterations.")
     

@@ -92,6 +92,7 @@ class ResponseHandlerMixin:
         )
 
     def _execute_tool_sync(self, tool_call, tool_context, trace_id, parent_span_id, execution_id, iteration, *, tool_retry_policy: RetryPolicy | None = None):
+       
         if self._tool_executor is None:
             return ToolResult(
                 tool_call_id=tool_call.id,
@@ -100,6 +101,7 @@ class ResponseHandlerMixin:
                 success=False,
                 error="ToolExecutionError: No tool executor configured.",
             )
+        
         return self._tool_executor.execute(
             tool_call,
             context=tool_context,
@@ -131,9 +133,11 @@ class ResponseHandlerMixin:
 
     @staticmethod
     def _consume_tool_call_slot(tool_context: ExecutionContext | None, result: ToolResult) -> None:
+        # tool_context: Keeps track of how many tool calls have been used.
         if tool_context is None:
             return
         try:
+            # tool_context.consume() tries to increase the tool call counter.
             tool_context.consume()
         except Exception:
             pass

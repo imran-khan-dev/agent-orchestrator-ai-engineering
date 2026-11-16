@@ -588,7 +588,6 @@ class ProviderRunnerMixin:
         name = type(exc).__name__
         return name in {"CancelledError", "TaskCancelledException"}
 
-
     #  When agent retries, keep track of the retry attempts. Helpful for debugging.
     def _record_retry_event(
         self,

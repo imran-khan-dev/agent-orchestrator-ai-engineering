@@ -28,18 +28,21 @@ class RetryPolicy(BaseModel):
     )
     initial_delay: float = Field(
         default=0.0, ge=0.0, description="Delay in seconds before the first retry."
-    )  # why delay?
+    )
 
     max_delay: float = Field(
         default=0.0, ge=0.0, description="Maximum backoff delay in seconds."
     )
     backoff_multiplier: float = Field(
+        # Increasing the waiting time after each failed attempt
         default=1.0, gt=0.0, description="Exponential backoff multiplier."
-    )  # why exponential backoff what it is?
+    )  
 
     jitter: bool = Field(
+        # Jitter adds randomness to retry waiting times, 
+        # so the requests don't all arrive at exactly the same moment.
         default=False, description="Apply randomization to retry delays when enabled."
-    )  # why jitter what it is?
+    ) 
     
     retry_on: tuple[type[BaseException], ...] | None = Field(
         default=None,
